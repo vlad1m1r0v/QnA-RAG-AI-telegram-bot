@@ -1,0 +1,21 @@
+[llm]
+model = "llama-3.3-70b-versatile"
+temperature = 0.2
+
+[embeddings]
+model = "intfloat/multilingual-e5-base"
+device = "cpu"
+vector_size = 768
+
+[qdrant]
+top_k = 6
+distance = "COSINE"
+
+[scraper]
+user_agent = "Mozilla/5.0 (compatible; RAGBot/1.0)"
+requests_per_second = 2
+
+[text_splitter]
+chunk_size = 512
+chunk_overlap = 50
+separators = ["\n\n", "\n", ".", " ", ""]

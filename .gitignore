@@ -1,4 +1,6 @@
 .vscode
+.idea
+CLAUDE.md
 .venv
 .env
 __pycache__/

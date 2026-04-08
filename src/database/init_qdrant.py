@@ -1,11 +1,12 @@
 import os
 import asyncio
 
-from src.logger import get_logger
-from src.config import settings
+from src.config import config
+from src.secrets import secrets
+from src.utils.logger import get_logger
 
-os.environ["USER_AGENT"] = settings.user_agent
-os.environ["HUGGING_FACE_HUB_TOKEN"] = settings.hf_token
+os.environ["USER_AGENT"] = config.scraper.user_agent
+os.environ["HUGGING_FACE_HUB_TOKEN"] = secrets.hf_token
 
 import nest_asyncio
 from langchain_community.document_loaders import SitemapLoader
@@ -28,9 +29,6 @@ SITEMAPS = [
 ]
 
 
-QDRANT_COLLECTION_NAME = settings.collection_name
-QDRANT_URL = settings.qdrant_url
-
 def parse_content(soup):
     for s in soup(['nav', 'header', 'footer', 'aside', 'script', 'style']):
         s.decompose()
@@ -39,11 +37,11 @@ def parse_content(soup):
 
 async def main():
     logger.info("Starting database initialization process")
-    
-    logger.info(f"Loading embedding model: {settings.embedding_model}")
+
+    logger.info(f"Loading embedding model: {config.embeddings.model}")
     embeddings = HuggingFaceEmbeddings(
-        model_name=settings.embedding_model,
-        model_kwargs={'device': 'cpu'}
+        model_name=config.embeddings.model,
+        model_kwargs={'device': config.embeddings.device}
     )
 
     all_docs = []
@@ -54,10 +52,10 @@ async def main():
                 web_path=sitemap_url,
                 parsing_function=parse_content,
             )
-            loader.requests_per_second = 2
-            
-            docs = loader.load() 
-            
+            loader.requests_per_second = config.scraper.requests_per_second
+
+            docs = loader.load()
+
             all_docs.extend(docs)
             logger.info(f"Successfully loaded {len(docs)} pages from {sitemap_url}")
         except Exception as e:
@@ -67,31 +65,34 @@ async def main():
 
     logger.info("Splitting text into chunks")
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=512, 
-        chunk_overlap=50,
-        separators=["\n\n", "\n", ".", " ", ""]
+        chunk_size=config.text_splitter.chunk_size,
+        chunk_overlap=config.text_splitter.chunk_overlap,
+        separators=config.text_splitter.separators,
     )
     chunks = text_splitter.split_documents(all_docs)
     logger.info(f"Created {len(chunks)} chunks from documents")
 
-    logger.info(f"Connecting to Qdrant at {QDRANT_URL}")
-    client = QdrantClient(url=QDRANT_URL)
-    
-    if client.collection_exists(QDRANT_COLLECTION_NAME):
-        logger.warning(f"Collection '{QDRANT_COLLECTION_NAME}' already exists. Recreating...")
-        client.delete_collection(QDRANT_COLLECTION_NAME)
-        
+    logger.info(f"Connecting to Qdrant at {secrets.qdrant_url}")
+    client = QdrantClient(url=secrets.qdrant_url)
+
+    if client.collection_exists(secrets.qdrant_collection_name):
+        logger.warning(f"Collection '{secrets.qdrant_collection_name}' already exists. Recreating...")
+        client.delete_collection(secrets.qdrant_collection_name)
+
     client.create_collection(
-        collection_name=QDRANT_COLLECTION_NAME,
-        vectors_config=models.VectorParams(size=768, distance=models.Distance.COSINE),
+        collection_name=secrets.qdrant_collection_name,
+        vectors_config=models.VectorParams(
+            size=config.embeddings.vector_size,
+            distance=models.Distance[config.qdrant.distance],
+        ),
     )
 
     logger.info("Uploading vectors to Qdrant (this may take a few minutes)...")
     QdrantVectorStore.from_documents(
         documents=chunks,
         embedding=embeddings,
-        url=QDRANT_URL,
-        collection_name=QDRANT_COLLECTION_NAME,
+        url=secrets.qdrant_url,
+        collection_name=secrets.qdrant_collection_name,
     )
 
     logger.info("Database initialization process completed successfully!")

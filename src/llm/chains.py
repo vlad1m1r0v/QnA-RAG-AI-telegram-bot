@@ -6,32 +6,36 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 
-from src.config import settings
+from src.config import config
+from src.secrets import secrets
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 def get_rag_chain():
     llm = ChatGroq(
-        temperature=0.2,
-        groq_api_key=settings.groq_api_key,
-        model_name=settings.llm_model
+        temperature=config.llm.temperature,
+        groq_api_key=secrets.groq_api_key,
+        model_name=config.llm.model,
     )
 
     embeddings = HuggingFaceEmbeddings(
-        model_name=settings.embedding_model,
-        model_kwargs={'device': 'cpu'}
-    )
-    
-    client = QdrantClient(url=settings.qdrant_url)
-    vector_store = QdrantVectorStore(
-        client=client,
-        collection_name=settings.collection_name,
-        embedding=embeddings,
-    )
-    
-    retriever = vector_store.as_retriever(
-        search_kwargs={"k": settings.top_k}
+        model_name=config.embeddings.model,
+        model_kwargs={'device': config.embeddings.device},
     )
 
-    template = """Ви — професійний консультант компанії. 
+    client = QdrantClient(url=secrets.qdrant_url)
+    vector_store = QdrantVectorStore(
+        client=client,
+        collection_name=secrets.qdrant_collection_name,
+        embedding=embeddings,
+    )
+
+    retriever = vector_store.as_retriever(
+        search_kwargs={"k": config.qdrant.top_k}
+    )
+
+    template = """Ви — професійний консультант компанії.
 Використовуйте надані фрагменти контексту, щоб відповісти на запитання користувача.
 Якщо ви не знаєте відповіді, просто скажіть, що ви не знаєте, не намагайтеся вигадувати відповідь.
 
@@ -45,7 +49,18 @@ def get_rag_chain():
     prompt = ChatPromptTemplate.from_template(template)
 
     def format_docs(docs):
-        return "\n\n".join(f"Source: {d.metadata.get('source')}\Content: {d.page_content}" for d in docs)
+        logger.info(f"Retrieved {len(docs)} chunks from Qdrant")
+
+        formatted_chunks = []
+        for i, doc in enumerate(docs):
+            source = doc.metadata.get('source', 'Unknown')
+            content_snippet = doc.page_content[:150].replace('\n', ' ')
+
+            logger.info(f"Chunk {i+1} | Source: {source} | Content: {content_snippet}...")
+
+            formatted_chunks.append(f"Source: {source}\nContent: {doc.page_content}")
+
+        return "\n\n".join(formatted_chunks)
 
     rag_chain = (
         {"context": retriever | format_docs, "question": RunnablePassthrough()}
@@ -57,7 +72,9 @@ def get_rag_chain():
     return rag_chain
 
 
-def ask_bot(question: str):
-    formatted_query = f"query: {question}"
-    chain = get_rag_chain()
-    return chain.invoke(formatted_query)
+def ask_bot(question: str) -> str:
+    return get_rag_chain().invoke(f"query: {question}")
+
+
+async def ask_bot_async(question: str) -> str:
+    return await get_rag_chain().ainvoke(f"query: {question}")
