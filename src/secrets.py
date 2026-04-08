@@ -11,6 +11,7 @@ class Secrets(BaseSettings):
     groq_api_key: str = Field(alias="GROQ_API_KEY")
     assembly_ai_api_key: str = Field(alias="ASSEMBLY_AI_API_KEY")
     telegram_bot_key: str = Field(alias="TELEGRAM_BOT_KEY")
+    mongodb_url: str = Field(alias="MONGODB_URL")
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

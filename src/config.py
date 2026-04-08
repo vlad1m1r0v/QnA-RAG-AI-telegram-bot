@@ -34,12 +34,18 @@ class TextSplitterConfig(BaseModel):
     separators: list[str]
 
 
+class MemoryConfig(BaseModel):
+    window_size: int
+    summary_max_sentences: int
+
+
 class AppConfig(BaseSettings):
     llm: LLMConfig
     embeddings: EmbeddingsConfig
     qdrant: QdrantConfig
     scraper: ScraperConfig
     text_splitter: TextSplitterConfig
+    memory: MemoryConfig
 
     model_config = SettingsConfigDict(toml_file="config.toml")
 

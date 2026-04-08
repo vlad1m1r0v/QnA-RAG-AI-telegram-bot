@@ -8,7 +8,7 @@ device = "cpu"
 vector_size = 768
 
 [qdrant]
-top_k = 6
+top_k = 8
 distance = "COSINE"
 
 [scraper]
@@ -19,3 +19,7 @@ requests_per_second = 2
 chunk_size = 512
 chunk_overlap = 50
 separators = ["\n\n", "\n", ".", " ", ""]
+
+[memory]
+window_size = 8
+summary_max_sentences = 5
