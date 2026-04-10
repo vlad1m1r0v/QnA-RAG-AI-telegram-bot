@@ -1,10 +1,17 @@
 import asyncio
+import re
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.mongodb import MongoDBSaver
 
 from src.llm.graph import build_graph, ask_bot_async, reset_state_async
@@ -21,12 +28,29 @@ bot = Bot(
 
 dp = Dispatcher()
 
+_ALLOWED_TAGS = {'b', 'i', 'code', 'pre', 'a', 'blockquote'}
+
+
+def sanitize_telegram_html(text: str) -> str:
+    text = re.sub(r'<br\s*/?>', '\n', text)
+    text = re.sub(
+        r'<(/?)(\w+)([^>]*)>',
+        lambda m: m.group(0) if m.group(2).lower() in _ALLOWED_TAGS else '',
+        text,
+    )
+    return text
+
 
 async def _reply_llm(message: Message, question: str, graph) -> None:
     status_msg = await message.answer("Шукаю відповідь... ⏳")
     try:
         result = await ask_bot_async(graph, question, str(message.chat.id))
-        await status_msg.edit_text(result["response_text"])
+        reply_markup = None
+        if result["response_type"] == "brief_ready":
+            reply_markup = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="⏱ Естімейт проєкту", callback_data="gen_estimate")
+            ]])
+        await status_msg.edit_text(sanitize_telegram_html(result["response_text"]), reply_markup=reply_markup)
     except Exception as e:
         logger.error(f"LLM reply failed: {e}")
         await status_msg.edit_text("Виникла помилка при отриманні відповіді ❌", parse_mode=None)
@@ -48,6 +72,24 @@ async def cmd_start(message: Message, graph) -> None:
 async def cmd_reset_memory(message: Message, graph) -> None:
     await reset_state_async(graph, str(message.chat.id))
     await message.answer("Чат та бриф очищено. Починаємо з початку 🔄", parse_mode=None)
+
+
+@dp.callback_query(F.data == "gen_estimate")
+async def handle_estimate(callback: CallbackQuery, graph) -> None:
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer()
+    await bot.send_chat_action(callback.message.chat.id, "typing")
+
+    thread_id = str(callback.from_user.id)
+    result = await graph.ainvoke(
+        {"messages": [HumanMessage(content="__ESTIMATE__")]},
+        config={"configurable": {"thread_id": thread_id}},
+    )
+
+    await callback.message.answer(
+        sanitize_telegram_html(result["messages"][-1].content),
+        parse_mode="HTML",
+    )
 
 
 @dp.message(F.text)

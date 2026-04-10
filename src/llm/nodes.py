@@ -1,5 +1,4 @@
 from functools import lru_cache
-from typing import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage, RemoveMessage, AIMessage
 from langchain_groq import ChatGroq
@@ -12,6 +11,11 @@ from src.llm.retriever import get_retriever
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_HTML_FORMAT_RULE = (
+    "Використовуй ТІЛЬКИ ці Telegram HTML теги: <b>, <i>, <code>, <pre>, <blockquote>.\n"
+    "НЕ використовуй <br>, <p>, <div>, <span>, <h1>–<h6> або будь-які інші HTML теги.\n"
+)
 
 
 # ── Structured output schemas ──────────────────────────────────────────────
@@ -54,7 +58,6 @@ class ExtractionOutput(BaseModel):
     )
 
 
-
 # ── LLM factory ───────────────────────────────────────────────────────────
 
 @lru_cache(maxsize=8)
@@ -74,7 +77,7 @@ def _format_docs(docs) -> str:
     for i, doc in enumerate(docs):
         source = doc.metadata.get("source", "Unknown")
         snippet = doc.page_content[:150].replace("\n", " ")
-        logger.info(f"Chunk {i+1} | Source: {source} | Content: {snippet}...")
+        logger.info(f"Chunk {i + 1} | Source: {source} | Content: {snippet}...")
         chunks.append(f"Source: {source}\nContent: {doc.page_content}")
     return "\n\n".join(chunks)
 
@@ -130,16 +133,16 @@ async def router_node(state: AgentState) -> dict:
     llm = _get_llm(0.0).with_structured_output(RouterOutput)
 
     system = (
-        "Classify the user message intent. Return a JSON object.\n\n"
-        "has_question: true if the message contains a question about a company — "
-        "its services, technology, portfolio, team, prices, contacts, or any company topic.\n"
-        "has_project_info: true if the message contains ANY information that could help "
-        "build a project brief: project type, desired features, goals, integrations, "
-        "target audience, budget hints, deadlines, or answers to previous brief questions.\n"
-        "is_nonsense: true ONLY if the message is completely irrelevant — weather, "
-        "general knowledge, prices of unrelated goods, random chitchat. "
-        "Mutually exclusive with has_question and has_project_info.\n\n"
-        "IMPORTANT: has_question and has_project_info can both be true simultaneously."
+        "Класифікуй намір повідомлення користувача. Поверни JSON об'єкт.\n\n"
+        "has_question: true якщо повідомлення містить питання про компанію — "
+        "її послуги, технології, портфоліо, команду, ціни, контакти або будь-яку іншу тему про компанію.\n"
+        "has_project_info: true якщо повідомлення містить БУДЬ-ЯКУ інформацію корисну "
+        "для брифу проєкту: тип проєкту, бажаний функціонал, цілі, інтеграції, "
+        "цільова аудиторія, бюджет, терміни або відповіді на попередні питання брифу.\n"
+        "is_nonsense: true ТІЛЬКИ якщо повідомлення абсолютно нерелевантне — погода, "
+        "загальні знання, ціни на непов'язані товари, випадковий чат. "
+        "Взаємовиключне з has_question та has_project_info.\n\n"
+        "ВАЖЛИВО: has_question та has_project_info можуть бути true одночасно."
     )
 
     result: RouterOutput = await llm.ainvoke([
@@ -169,14 +172,20 @@ async def qna_node(state: AgentState) -> dict:
 
     summary = state.get("summary", "")
     system = (
-        "Ви — AI-асистент компанії. Відповідайте на питання користувача ТІЛЬКИ на основі "
-        "наданого контексту про компанію. Відповідь має бути чіткою та корисною.\n"
-        "НЕ ставте уточнюючих питань і НЕ згадуйте бриф проєкту.\n\n"
-        "═══ КОНТЕКСТ ПРО КОМПАНІЮ ═══\n"
-        f"{context}\n"
-        + (f"\n═══ СУМАРИЗАЦІЯ ПОПЕРЕДНЬОЇ РОЗМОВИ ═══\n{summary}\n" if summary else "")
-        + "\nМова відповіді: виключно українська. "
-        "Форматування: Telegram HTML (<b>, <i>, <code>). Не використовуйте Markdown (**, __ тощо)."
+            "Ви — AI-асистент компанії. Відповідайте на питання користувача ТІЛЬКИ на основі "
+            "наданого контексту про компанію. Відповідь має бути чіткою та корисною.\n"
+            "НЕ ставте уточнюючих питань і НЕ згадуйте бриф проєкту.\n\n"
+            "ВАЖЛИВІ ОБМЕЖЕННЯ:\n"
+            "• Якщо користувач питає про вартість, ціни або бюджет проєкту — не називайте жодних цифр. "
+            "Поясніть що точну вартість може визначити лише комерційний відділ після детального "
+            "обговорення вимог, і запропонуйте зв'язатись напряму.\n"
+            "• Не розкривайте контактну інформацію (телефони, email) у відповіді.\n\n"
+            "═══ КОНТЕКСТ ПРО КОМПАНІЮ ═══\n"
+            f"{context}\n"
+            + (f"\n═══ СУМАРИЗАЦІЯ ПОПЕРЕДНЬОЇ РОЗМОВИ ═══\n{summary}\n" if summary else "")
+            + "\nМова відповіді: виключно українська. "
+              "Форматування: Telegram HTML (<b>, <i>, <code>). Не використовуйте Markdown (**, __ тощо).\n"
+            + _HTML_FORMAT_RULE
     )
 
     response = await _get_llm(0.3).ainvoke([SystemMessage(system), HumanMessage(last_human.content)])
@@ -250,7 +259,8 @@ async def extraction_node(state: AgentState) -> dict:
     # Merge with existing state — never overwrite a non-None/non-empty value with None/empty
     return {
         "project_type": result.project_type if result.project_type is not None else state.get("project_type"),
-        "project_description": result.project_description if result.project_description is not None else state.get("project_description"),
+        "project_description": result.project_description if result.project_description is not None else state.get(
+            "project_description"),
         "goals": _merge_list(state.get("goals") or [], result.goals),
         "key_features": _merge_list(state.get("key_features") or [], result.key_features),
         "additional_features": _merge_list(state.get("additional_features") or [], result.additional_features),
@@ -292,11 +302,11 @@ async def validation_node(state: AgentState) -> dict:
         empty_fields.append("Опис проєкту")
 
     list_checks = [
-        ("Цілі",                  "goals",               1),
-        ("Ключовий функціонал",   "key_features",        2),
+        ("Цілі", "goals", 1),
+        ("Ключовий функціонал", "key_features", 2),
         ("Додатковий функціонал", "additional_features", 1),
-        ("Інтеграції",            "integrations",        1),
-        ("Матеріали від клієнта", "client_materials",    1),
+        ("Інтеграції", "integrations", 1),
+        ("Матеріали від клієнта", "client_materials", 1),
     ]
     for name, field, min_items in list_checks:
         val = state.get(field) or []
@@ -321,7 +331,9 @@ async def clarifying_node(state: AgentState) -> dict:
     qna_response = state.get("qna_response")
     project_type = state.get("project_type")
 
-    fields_info = f"Відсутні поля: {', '.join(empty_fields)}\n" if empty_fields else ""
+    # Ask about at most 1 field when project type is unknown, else 2 fields
+    fields_to_ask = empty_fields[:1] if not project_type else empty_fields[:2]
+    fields_info = f"Відсутні поля: {', '.join(fields_to_ask)}\n" if fields_to_ask else ""
 
     qna_block = ""
     if qna_response:
@@ -345,16 +357,19 @@ async def clarifying_node(state: AgentState) -> dict:
         task_instruction = (
             f"Тип проєкту відомий: {project_type}. Дійте як досвідчений бізнес-аналітик.\n\n"
             "Для кожного відсутнього поля:\n"
-            "1. Коротко поясніть чому ця інформація важлива (1 речення)\n"
-            "2. Запропонуйте 2-3 конкретних типових варіанти саме для цього типу проєкту\n"
-            "3. Задайте чітке питання\n\n"
+            "1. Запропонуйте 2-3 конкретних типових варіанти саме для цього типу проєкту\n"
+            "2. Задайте чітке питання\n"
+            "НЕ пояснюйте чому це питання важливе — просто питайте природньо.\n\n"
             "Приклад для авторизації в університетському боті:\n"
             "<i>Як користувачі будуть входити в систему? Для університетських ботів зазвичай:\n"
             "• Номер телефону — ділиться через Telegram, звіряється з базою університету\n"
             "• Студентський ID — вводять вручну\n"
             "• SSO університету — якщо є корпоративна система\n"
             "Який варіант підходить?</i>\n\n"
-            "Можна задати 1-3 питання за раз.\n"
+            "Задавай питання максимум про 1-2 незаповнених поля за раз.\n"
+            "Не намагайся заповнити всі поля в одному повідомленні.\n"
+            "Обери найважливіші поля і задай питання тільки про них.\n"
+            "В наступному повідомленні перейдеш до інших полів.\n"
             "НЕ питайте про поля зі значенням 'не визначено' — вони вже визначені.\n"
         )
 
@@ -368,6 +383,7 @@ async def clarifying_node(state: AgentState) -> dict:
         "• Тільки українська мова\n"
         "• Telegram HTML: <b>жирний</b>, <i>курсив</i>\n"
         "• НЕ використовуйте Markdown (**, __ тощо)\n"
+        + _HTML_FORMAT_RULE +
         "• НЕ називайте технічних назв полів (project_type, goals тощо)\n"
         "• НЕ показуйте стан брифу або назви полів у відповіді\n"
     )
@@ -393,7 +409,9 @@ async def brief_format_node(state: AgentState) -> dict:
         "• Ключовий функціонал: кожен пункт — повне описове речення\n"
         "• Тільки українська мова\n"
         "• Telegram HTML: <b>жирний</b>, <i>курсив</i>\n"
-        "• НЕ використовуйте Markdown (**, __ тощо)\n\n"
+        "• НЕ використовуйте Markdown (**, __ тощо)\n"
+        + _HTML_FORMAT_RULE +
+        "\n"
         "Використовуйте цей точний формат:\n\n"
         "<b>Бриф проєкту</b>\n\n"
         "<b>Тип проєкту:</b> [значення]\n\n"
@@ -425,7 +443,8 @@ async def nonsense_node(state: AgentState) -> dict:
         "• Відповіді на питання про компанію (послуги, технології, портфоліо)\n"
         "• Збір брифу для нового проєкту\n\n"
         "Будьте доброзичливими і лаконічними. "
-        "Тільки українська мова. Telegram HTML. Не Markdown."
+        "Тільки українська мова. Telegram HTML. Не Markdown.\n"
+        + _HTML_FORMAT_RULE
     )
     response = await _get_llm(0.5).ainvoke([
         SystemMessage(system),
@@ -436,6 +455,53 @@ async def nonsense_node(state: AgentState) -> dict:
         "messages": [AIMessage(content=response.content)],
         "response_type": "brief_clarifying",
         "qna_response": None,
+    }
+
+
+# ── NODE 8: estimation_node ───────────────────────────────────────────────
+
+async def estimation_node(state: AgentState) -> dict:
+    brief_state = _format_brief_state(state)
+
+    system = (
+        "Ти — досвідчений Tech Lead компанії з розробки ПЗ.\n"
+        "На основі брифу проєкту надай детальну оцінку часу розробки по стадіях.\n\n"
+        "ОБОВ'ЯЗКОВІ стадії (завжди присутні):\n"
+        "- Pre-project work (UX) — уточнення вимог, сценарії, планування\n"
+        "- Design (UI) — підготовка інтерфейсів, макети\n"
+        "- Development — основна розробка\n"
+        "- Testing — функціональне та інтеграційне тестування\n\n"
+        "ДОДАТКОВІ стадії (додай якщо доречно для цього типу проєкту):\n"
+        "- DevOps / Deployment — якщо проєкт потребує складної інфраструктури\n"
+        "- ML / AI Integration — якщо є AI компоненти\n"
+        "- Інші стадії на твій розсуд як Tech Lead\n\n"
+        "Для кожної стадії вкажи:\n"
+        "- Назву стадії (технічні абревіатури не перекладати: DevOps, UX, UI, API тощо)\n"
+        "- Опис робіт — конкретно що робиться на цій стадії для ЦЬОГО проєкту\n"
+        "- Години: Min – Max\n\n"
+        "ВАЖЛИВО щодо діапазону годин:\n"
+        "- Чим розмитіший і нечіткий бриф — тим більша різниця між Min і Max\n"
+        "- Чим конкретніші вимоги — тим менша різниця\n\n"
+        "Формат відповіді (Telegram HTML):\n\n"
+        "<b>Оцінка часу розробки</b>\n\n"
+        "<b>Стадія: Pre-project work (UX)</b>\n"
+        "<i>Роботи:</i> [конкретний опис для цього проєкту]\n"
+        "<i>Години:</i> X – Y\n\n"
+        "... (інші стадії)\n\n"
+        "<b>Разом: приблизно X – Y годин</b>\n"
+        "<b>Термін: приблизно X – Y місяців</b>\n\n"
+        "<i>[Дисклеймер що оцінка орієнтовна, точні терміни і вартість "
+        "визначає комерційний відділ після детального обговорення]</i>\n\n"
+        + _HTML_FORMAT_RULE +
+        f"\n═══ БРИФ ПРОЄКТУ ═══\n{brief_state}"
+    )
+
+    response = await _get_llm(0.3).ainvoke([SystemMessage(system)])
+    logger.info("estimation_node completed")
+    return {
+        "messages": [AIMessage(content=response.content)],
+        "response_type": "estimation",
+        "estimation": response.content,
     }
 
 
@@ -451,9 +517,9 @@ async def summarize_node(state: AgentState) -> dict:
         for m in old_messages
     )
     summary_prompt = (
-        f"Створіть стислу сумаризацію розмови не більше {config.memory.summary_max_sentences} речень.\n"
-        + (f"Існуюча сумаризація: {existing_summary}\n\n" if existing_summary else "")
-        + f"Повідомлення для сумаризації:\n{formatted}\n\nСумаризація:"
+            f"Створіть стислу сумаризацію розмови не більше {config.memory.summary_max_sentences} речень.\n"
+            + (f"Існуюча сумаризація: {existing_summary}\n\n" if existing_summary else "")
+            + f"Повідомлення для сумаризації:\n{formatted}\n\nСумаризація:"
     )
 
     response = await _get_llm(config.llm.temperature).ainvoke([HumanMessage(summary_prompt)])

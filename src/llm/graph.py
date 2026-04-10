@@ -14,7 +14,15 @@ from src.llm.nodes import (
     brief_format_node,
     nonsense_node,
     summarize_node,
+    estimation_node,
 )
+
+
+def _route_from_start(state: AgentState) -> str:
+    last = next((m for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), None)
+    if last and last.content == "__ESTIMATE__":
+        return "estimation_node"
+    return "router_node"
 
 
 def _should_summarize(state: AgentState) -> str:
@@ -52,9 +60,14 @@ def build_graph(checkpointer: MongoDBSaver):
     builder.add_node("brief_format_node", brief_format_node)
     builder.add_node("nonsense_node", nonsense_node)
     builder.add_node("summarize", summarize_node)
+    builder.add_node("estimation_node", estimation_node)
 
-    # Entry point
-    builder.add_edge(START, "router_node")
+    # Entry point — bypass router for estimate trigger
+    builder.add_conditional_edges(
+        START,
+        _route_from_start,
+        {"estimation_node": "estimation_node", "router_node": "router_node"},
+    )
 
     # Fan-out: router → parallel qna/extraction (via Send) or nonsense
     builder.add_conditional_edges("router_node", _route_from_router)
@@ -71,7 +84,7 @@ def build_graph(checkpointer: MongoDBSaver):
     )
 
     # Terminal nodes → summarize or END
-    for terminal in ["nonsense_node", "clarifying_node", "brief_format_node"]:
+    for terminal in ["nonsense_node", "clarifying_node", "brief_format_node", "estimation_node"]:
         builder.add_conditional_edges(
             terminal,
             _should_summarize,
@@ -99,6 +112,7 @@ async def reset_state_async(graph, thread_id: str) -> None:
                 "additional_features": [],
                 "integrations": [],
                 "client_materials": [],
+                "estimation": None,
                 "brief_status": "in_progress",
                 "response_type": "brief_clarifying",
                 "qna_response": None,
