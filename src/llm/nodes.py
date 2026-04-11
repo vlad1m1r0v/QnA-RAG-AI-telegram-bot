@@ -8,6 +8,7 @@ from src.config import config
 from src.secrets import secrets
 from src.llm.state import AgentState
 from src.llm.retriever import get_retriever
+from src.utils.brief import format_brief_state, merge_list, is_str_complete
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -82,40 +83,8 @@ def _format_docs(docs) -> str:
     return "\n\n".join(chunks)
 
 
-def _format_brief_state(state: AgentState) -> str:
-    def fmt(val):
-        if val is None:
-            return "не заповнено"
-        if isinstance(val, list):
-            return ("• " + "\n• ".join(val)) if val else "не заповнено"
-        return str(val) if val else "не заповнено"
-
-    return (
-        f"Тип проєкту: {fmt(state.get('project_type'))}\n"
-        f"Опис проєкту: {fmt(state.get('project_description'))}\n"
-        f"Цілі: {fmt(state.get('goals', []))}\n"
-        f"Ключовий функціонал: {fmt(state.get('key_features', []))}\n"
-        f"Додатковий функціонал: {fmt(state.get('additional_features', []))}\n"
-        f"Інтеграції: {fmt(state.get('integrations', []))}\n"
-        f"Матеріали від клієнта: {fmt(state.get('client_materials', []))}\n"
-    )
-
-
-def _merge_list(existing: list[str], new_items: list[str] | None) -> list[str]:
-    """Merge two lists deduplicating items.
-
-    Rules:
-    - Real data replaces a ['не визначено'] placeholder.
-    - 'не визначено' is ignored when real data already exists.
-    - Otherwise new items are appended without duplicates.
-    """
-    if not new_items:
-        return existing
-    if existing == ["не визначено"]:
-        return new_items
-    if "не визначено" in new_items and existing:
-        return existing
-    return existing + [i for i in new_items if i not in existing]
+_format_brief_state = format_brief_state
+_merge_list = merge_list
 
 
 def _get_last_human(state: AgentState) -> HumanMessage:
@@ -271,18 +240,6 @@ async def extraction_node(state: AgentState) -> dict:
 
 # ── NODE 4: validation_node ───────────────────────────────────────────────
 
-def _is_str_complete(val: str | None) -> bool:
-    return bool(val and val != "не визначено")
-
-
-def _is_list_complete(val: list[str], min_items: int = 1) -> bool:
-    if not val:
-        return False
-    if "не визначено" in val:
-        return True
-    return len(val) >= min_items
-
-
 async def validation_node(state: AgentState) -> dict:
     logger.info(
         f"validation INPUT: "
@@ -296,9 +253,9 @@ async def validation_node(state: AgentState) -> dict:
 
     empty_fields: list[str] = []
 
-    if not _is_str_complete(state.get("project_type")):
+    if not is_str_complete(state.get("project_type")):
         empty_fields.append("Тип проєкту")
-    if not _is_str_complete(state.get("project_description")):
+    if not is_str_complete(state.get("project_description")):
         empty_fields.append("Опис проєкту")
 
     list_checks = [

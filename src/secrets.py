@@ -13,6 +13,10 @@ class Secrets(BaseSettings):
     telegram_bot_key: str = Field(alias="TELEGRAM_BOT_KEY")
     mongodb_url: str = Field(alias="MONGODB_URL")
 
+    mailjet_api_key: str = Field(alias="MAILJET_API_KEY")
+    mailjet_secret_key: str = Field(alias="MAILJET_SECRET_KEY")
+    default_email: str = Field(alias="DEFAULT_FROM_EMAIL")
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 
