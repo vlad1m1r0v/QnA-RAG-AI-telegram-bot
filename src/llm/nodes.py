@@ -8,7 +8,8 @@ from src.config import config
 from src.secrets import secrets
 from src.llm.state import AgentState
 from src.llm.retriever import get_retriever
-from src.utils.brief import format_brief_state, merge_list, is_str_complete
+from src.utils.brief import format_brief_state, merge_list, is_str_complete, is_list_complete
+from src.utils.docs import format_docs
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -72,21 +73,6 @@ def _get_llm(temperature: float) -> ChatGroq:
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
-def _format_docs(docs) -> str:
-    logger.info(f"Retrieved {len(docs)} chunks from Qdrant")
-    chunks = []
-    for i, doc in enumerate(docs):
-        source = doc.metadata.get("source", "Unknown")
-        snippet = doc.page_content[:150].replace("\n", " ")
-        logger.info(f"Chunk {i + 1} | Source: {source} | Content: {snippet}...")
-        chunks.append(f"Source: {source}\nContent: {doc.page_content}")
-    return "\n\n".join(chunks)
-
-
-_format_brief_state = format_brief_state
-_merge_list = merge_list
-
-
 def _get_last_human(state: AgentState) -> HumanMessage:
     return next(m for m in reversed(state["messages"]) if isinstance(m, HumanMessage))
 
@@ -137,7 +123,7 @@ async def qna_node(state: AgentState) -> dict:
     last_human = _get_last_human(state)
     retriever = get_retriever()
     docs = await retriever.ainvoke(f"query: {last_human.content}")
-    context = _format_docs(docs)
+    context = format_docs(docs)
 
     summary = state.get("summary", "")
     system = (
@@ -167,7 +153,7 @@ async def qna_node(state: AgentState) -> dict:
 async def extraction_node(state: AgentState) -> dict:
     last_human = _get_last_human(state)
     last_ai = _get_last_ai(state)
-    brief_state = _format_brief_state(state)
+    brief_state = format_brief_state(state)
     llm = _get_llm(0.0).with_structured_output(ExtractionOutput)
 
     context_block = ""
@@ -230,11 +216,11 @@ async def extraction_node(state: AgentState) -> dict:
         "project_type": result.project_type if result.project_type is not None else state.get("project_type"),
         "project_description": result.project_description if result.project_description is not None else state.get(
             "project_description"),
-        "goals": _merge_list(state.get("goals") or [], result.goals),
-        "key_features": _merge_list(state.get("key_features") or [], result.key_features),
-        "additional_features": _merge_list(state.get("additional_features") or [], result.additional_features),
-        "integrations": _merge_list(state.get("integrations") or [], result.integrations),
-        "client_materials": _merge_list(state.get("client_materials") or [], result.client_materials),
+        "goals": merge_list(state.get("goals") or [], result.goals),
+        "key_features": merge_list(state.get("key_features") or [], result.key_features),
+        "additional_features": merge_list(state.get("additional_features") or [], result.additional_features),
+        "integrations": merge_list(state.get("integrations") or [], result.integrations),
+        "client_materials": merge_list(state.get("client_materials") or [], result.client_materials),
     }
 
 
@@ -266,8 +252,7 @@ async def validation_node(state: AgentState) -> dict:
         ("Матеріали від клієнта", "client_materials", 1),
     ]
     for name, field, min_items in list_checks:
-        val = state.get(field) or []
-        if len(val) < min_items and "не визначено" not in val:
+        if not is_list_complete(state.get(field) or [], min_items):
             empty_fields.append(name)
 
     brief_status = "complete" if not empty_fields else "in_progress"
@@ -283,7 +268,7 @@ async def validation_node(state: AgentState) -> dict:
 # ── NODE 5: clarifying_node ───────────────────────────────────────────────
 
 async def clarifying_node(state: AgentState) -> dict:
-    brief_state = _format_brief_state(state)
+    brief_state = format_brief_state(state)
     empty_fields = state.get("empty_fields") or []
     qna_response = state.get("qna_response")
     project_type = state.get("project_type")
@@ -357,7 +342,7 @@ async def clarifying_node(state: AgentState) -> dict:
 # ── NODE 6: brief_format_node ─────────────────────────────────────────────
 
 async def brief_format_node(state: AgentState) -> dict:
-    brief_state = _format_brief_state(state)
+    brief_state = format_brief_state(state)
 
     system = (
         "Відформатуйте повний детальний бриф проєкту для відображення користувачу.\n\n"
@@ -418,7 +403,7 @@ async def nonsense_node(state: AgentState) -> dict:
 # ── NODE 8: estimation_node ───────────────────────────────────────────────
 
 async def estimation_node(state: AgentState) -> dict:
-    brief_state = _format_brief_state(state)
+    brief_state = format_brief_state(state)
 
     system = (
         "Ти — досвідчений Tech Lead компанії з розробки ПЗ.\n"

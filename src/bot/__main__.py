@@ -3,6 +3,7 @@ import asyncio
 from aiogram import Dispatcher, F
 from aiogram.filters import Command
 from aiogram.fsm.storage.pymongo import PyMongoStorage
+from aiogram.types import BotCommand
 from langgraph.checkpoint.mongodb import MongoDBSaver
 
 from src.bot.handlers.callbacks import handle_estimate, handle_send_brief
@@ -18,8 +19,15 @@ from src.bot.states import BriefFSM
 from src.llm.graph import build_graph
 from src.secrets import secrets
 
+_BOT_COMMANDS = [
+    BotCommand(command="start", description="Почати розмову / очистити чат"),
+    BotCommand(command="reset-memory", description="Скинути бриф та пам'ять"),
+]
+
 
 async def main():
+    await bot.set_my_commands(_BOT_COMMANDS)
+
     fsm_storage = PyMongoStorage.from_url(secrets.mongodb_url)
     dp = Dispatcher(storage=fsm_storage)
 
