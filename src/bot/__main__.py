@@ -21,7 +21,7 @@ from src.secrets import secrets
 
 _BOT_COMMANDS = [
     BotCommand(command="start", description="Почати розмову / очистити чат"),
-    BotCommand(command="reset-memory", description="Скинути бриф та пам'ять"),
+    BotCommand(command="reset_memory", description="Скинути бриф та пам'ять"),
 ]
 
 
@@ -33,7 +33,7 @@ async def main():
 
     # State-specific handlers must be registered before generic ones.
     dp.message.register(cmd_start, Command("start"))
-    dp.message.register(cmd_reset_memory, Command("reset-memory"))
+    dp.message.register(cmd_reset_memory, Command("reset_memory"))
     dp.callback_query.register(handle_estimate, F.data == "gen_estimate")
     dp.callback_query.register(handle_send_brief, F.data == "send_brief")
     dp.message.register(handle_contact, BriefFSM.awaiting_contact, F.contact)
