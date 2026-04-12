@@ -1,7 +1,7 @@
 # Stage 1: export dependencies from poetry
 FROM python:3.12-slim AS builder
 
-RUN pip install --no-cache-dir poetry==2.1.3
+RUN pip install --no-cache-dir poetry==2.1.3 poetry-plugin-export
 
 WORKDIR /app
 
