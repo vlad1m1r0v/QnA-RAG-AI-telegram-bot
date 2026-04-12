@@ -16,3 +16,19 @@ services:
     volumes:
       - ./mongodb_data:/data/db
     restart: always
+
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      MONGODB_URL: mongodb://mongodb:27017
+    volumes:
+      - huggingface_cache:/app/.cache/huggingface
+    depends_on:
+      - qdrant
+      - mongodb
+    restart: always
+
+volumes:
+  huggingface_cache:
