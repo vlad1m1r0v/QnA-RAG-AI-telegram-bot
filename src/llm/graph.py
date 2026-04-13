@@ -70,7 +70,12 @@ def build_graph(checkpointer: MongoDBSaver):
     )
 
     # Fan-out: router → parallel qna/extraction (via Send) or nonsense
-    builder.add_conditional_edges("router_node", _route_from_router)
+    # path_map is a visualizer hint — Send() handles actual routing at runtime
+    builder.add_conditional_edges(
+        "router_node",
+        _route_from_router,
+        ["qna_node", "extraction_node", "nonsense_node"],
+    )
 
     # Fan-in: both parallel nodes converge on validation
     builder.add_edge("qna_node", "validation_node")
