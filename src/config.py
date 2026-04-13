@@ -16,6 +16,7 @@ class EmbeddingsConfig(BaseModel):
     model: str
     device: str
     vector_size: int
+    embed_batch_size: int
 
 
 class QdrantConfig(BaseModel):
