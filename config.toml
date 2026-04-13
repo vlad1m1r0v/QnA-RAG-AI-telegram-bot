@@ -6,6 +6,7 @@ temperature = 0.2
 model = "intfloat/multilingual-e5-base"
 device = "cpu"
 vector_size = 768
+embed_batch_size = 32
 
 [qdrant]
 top_k = 8
