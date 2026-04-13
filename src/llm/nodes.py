@@ -85,7 +85,7 @@ def _get_last_ai(state: AgentState) -> AIMessage | None:
 
 async def router_node(state: AgentState) -> dict:
     last_human = _get_last_human(state)
-    llm = _get_llm(0.0).with_structured_output(RouterOutput)
+    llm = _get_llm(0.0).with_structured_output(RouterOutput, method="json_schema")
 
     system = (
         "Класифікуй намір повідомлення користувача. Поверни JSON об'єкт.\n\n"
@@ -154,7 +154,7 @@ async def extraction_node(state: AgentState) -> dict:
     last_human = _get_last_human(state)
     last_ai = _get_last_ai(state)
     brief_state = format_brief_state(state)
-    llm = _get_llm(0.0).with_structured_output(ExtractionOutput)
+    llm = _get_llm(0.0).with_structured_output(ExtractionOutput, method="json_schema")
 
     context_block = ""
     if last_ai:
