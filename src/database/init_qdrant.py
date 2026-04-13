@@ -1,7 +1,5 @@
 import os
 import asyncio
-import math
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.config import config
 from src.secrets import secrets
@@ -37,35 +35,31 @@ def parse_content(soup):
 
     return "passage: " + soup.get_text(separator=" ", strip=True)
 
-
-def _load_sitemap(sitemap_url: str) -> tuple[str, list]:
-    loader = SitemapLoader(web_path=sitemap_url, parsing_function=parse_content)
-    loader.requests_per_second = config.scraper.requests_per_second
-    return sitemap_url, loader.load()
-
-
 async def main():
     logger.info("Starting database initialization process")
 
     logger.info(f"Loading embedding model: {config.embeddings.model}")
     embeddings = HuggingFaceEmbeddings(
         model_name=config.embeddings.model,
-        model_kwargs={'device': config.embeddings.device},
-        encode_kwargs={'batch_size': config.embeddings.embed_batch_size},
+        model_kwargs={'device': config.embeddings.device}
     )
 
-    logger.info(f"Scraping {len(SITEMAPS)} sitemaps in parallel...")
     all_docs = []
-    with ThreadPoolExecutor(max_workers=len(SITEMAPS)) as executor:
-        futures = {executor.submit(_load_sitemap, url): url for url in SITEMAPS}
-        for future in as_completed(futures):
-            url = futures[future]
-            try:
-                _, docs = future.result()
-                all_docs.extend(docs)
-                logger.info(f"Loaded {len(docs)} pages from {url}")
-            except Exception as e:
-                logger.error(f"Failed to process {url}: {str(e)}", exc_info=True)
+    for sitemap_url in SITEMAPS:
+        logger.info(f"Parsing sitemap: {sitemap_url}")
+        try:
+            loader = SitemapLoader(
+                web_path=sitemap_url,
+                parsing_function=parse_content,
+            )
+            loader.requests_per_second = config.scraper.requests_per_second
+
+            docs = loader.load()
+
+            all_docs.extend(docs)
+            logger.info(f"Successfully loaded {len(docs)} pages from {sitemap_url}")
+        except Exception as e:
+            logger.error(f"Failed to process {sitemap_url}: {str(e)}", exc_info=True)
 
     logger.info(f"Total documents loaded: {len(all_docs)}")
 
@@ -93,20 +87,13 @@ async def main():
         ),
     )
 
-    vector_store = QdrantVectorStore(
-        client=client,
-        collection_name=secrets.qdrant_collection_name,
+    logger.info("Uploading vectors to Qdrant (this may take a few minutes)...")
+    QdrantVectorStore.from_documents(
+        documents=chunks,
         embedding=embeddings,
+        url=secrets.qdrant_url,
+        collection_name=secrets.qdrant_collection_name,
     )
-
-    batch_size = config.embeddings.embed_batch_size
-    total_batches = math.ceil(len(chunks) / batch_size)
-    logger.info(f"Uploading {len(chunks)} chunks in {total_batches} batches of {batch_size}...")
-
-    for i in range(0, len(chunks), batch_size):
-        batch = chunks[i : i + batch_size]
-        vector_store.add_documents(batch)
-        logger.info(f"Batch {i // batch_size + 1}/{total_batches} uploaded")
 
     logger.info("Database initialization process completed successfully!")
 
