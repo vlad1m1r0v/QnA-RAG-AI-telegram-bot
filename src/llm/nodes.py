@@ -15,7 +15,7 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 _HTML_FORMAT_RULE = (
-    "Використовуй ТІЛЬКИ ці Telegram HTML теги: <b>, <i>, <code>, <pre>, <blockquote>.\n"
+    "Використовуй ТІЛЬКИ ці Telegram HTML теги: <b>, <i>.\n"
     "НЕ використовуй <br>, <p>, <div>, <span>, <h1>–<h6> або будь-які інші HTML теги.\n"
 )
 
@@ -88,7 +88,7 @@ async def router_node(state: AgentState) -> dict:
     llm = _get_llm(0.0).with_structured_output(RouterOutput, method="json_schema")
 
     system = (
-        "Класифікуй намір повідомлення користувача. Поверни JSON об'єкт.\n\n"
+        "Класифікуй намір ОСТАННЬОГО повідомлення користувача. Поверни JSON об'єкт.\n\n"
         "has_question: true якщо повідомлення містить питання про компанію — "
         "її послуги, технології, портфоліо, команду, ціни, контакти або будь-яку іншу тему про компанію.\n"
         "has_project_info: true якщо повідомлення містить БУДЬ-ЯКУ інформацію корисну "
@@ -97,11 +97,22 @@ async def router_node(state: AgentState) -> dict:
         "is_nonsense: true ТІЛЬКИ якщо повідомлення абсолютно нерелевантне — погода, "
         "загальні знання, ціни на непов'язані товари, випадковий чат. "
         "Взаємовиключне з has_question та has_project_info.\n\n"
-        "ВАЖЛИВО: has_question та has_project_info можуть бути true одночасно."
+        "ВАЖЛИВО: has_question та has_project_info можуть бути true одночасно.\n\n"
+        "КОНТЕКСТ РОЗМОВИ: нижче наведено останні повідомлення розмови перед поточним. "
+        "Переглянь їх, щоб знайти найближче питання асистента, на яке відповідає користувач. "
+        "Якщо останнє повідомлення користувача є відповіддю на питання асистента про проєкт — "
+        "це has_project_info, навіть якщо відповідь коротка ('так', 'ні', 'перший варіант' тощо). "
+        "Якщо асистент не ставив питання (наприклад, надіслав готовий бриф або підтвердження) — "
+        "класифікуй повідомлення користувача самостійно за його змістом."
     )
+
+    # Include recent conversation history so the router can interpret short
+    # replies (e.g. "так", "перший") as answers to earlier bot questions.
+    history = [m for m in state["messages"] if m is not last_human][-4:]
 
     result: RouterOutput = await llm.ainvoke([
         SystemMessage(system),
+        *history,
         HumanMessage(last_human.content),
     ])
     logger.info(
@@ -139,7 +150,7 @@ async def qna_node(state: AgentState) -> dict:
             f"{context}\n"
             + (f"\n═══ СУМАРИЗАЦІЯ ПОПЕРЕДНЬОЇ РОЗМОВИ ═══\n{summary}\n" if summary else "")
             + "\nМова відповіді: виключно українська. "
-              "Форматування: Telegram HTML (<b>, <i>, <code>). Не використовуйте Markdown (**, __ тощо).\n"
+              "Форматування: Telegram HTML (<b>, <i>). Не використовуйте Markdown (**, __ тощо).\n"
             + _HTML_FORMAT_RULE
     )
 

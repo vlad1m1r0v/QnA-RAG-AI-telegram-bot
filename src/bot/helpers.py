@@ -10,7 +10,7 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_ALLOWED_TAGS = {'b', 'i', 'code', 'pre', 'a', 'blockquote'}
+_ALLOWED_TAGS = {'b', 'i', 'a'}
 
 
 def sanitize_telegram_html(text: str) -> str:
