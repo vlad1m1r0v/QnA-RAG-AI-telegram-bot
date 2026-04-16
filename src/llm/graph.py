@@ -8,7 +8,7 @@ from src.llm.state import AgentState
 from src.llm.nodes import (
     router_node,
     qna_node,
-    extraction_node,
+    update_brief_node,
     validation_node,
     clarifying_node,
     brief_format_node,
@@ -26,7 +26,7 @@ def _route_from_start(state: AgentState) -> str:
 
 
 def _should_summarize(state: AgentState) -> str:
-    if len(state["messages"]) > config.memory.window_size:
+    if len(state["messages"]) >= config.memory.max_messages:
         return "summarize"
     return END
 
@@ -38,7 +38,7 @@ def _route_from_router(state: AgentState):
     if state.get("has_question"):
         sends.append(Send("qna_node", state))
     if state.get("has_project_info"):
-        sends.append(Send("extraction_node", state))
+        sends.append(Send("update_brief_node", state))
     # Fallback: if neither flag is set treat as nonsense
     return sends if sends else "nonsense_node"
 
@@ -54,7 +54,7 @@ def build_graph(checkpointer: MongoDBSaver):
 
     builder.add_node("router_node", router_node)
     builder.add_node("qna_node", qna_node)
-    builder.add_node("extraction_node", extraction_node)
+    builder.add_node("update_brief_node", update_brief_node)
     builder.add_node("validation_node", validation_node)
     builder.add_node("clarifying_node", clarifying_node)
     builder.add_node("brief_format_node", brief_format_node)
@@ -74,12 +74,12 @@ def build_graph(checkpointer: MongoDBSaver):
     builder.add_conditional_edges(
         "router_node",
         _route_from_router,
-        ["qna_node", "extraction_node", "nonsense_node"],
+        ["qna_node", "update_brief_node", "nonsense_node"],
     )
 
     # Fan-in: both parallel nodes converge on validation
     builder.add_edge("qna_node", "validation_node")
-    builder.add_edge("extraction_node", "validation_node")
+    builder.add_edge("update_brief_node", "validation_node")
 
     # Validation → format or clarify
     builder.add_conditional_edges(

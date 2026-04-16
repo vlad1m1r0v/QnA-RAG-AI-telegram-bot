@@ -22,5 +22,6 @@ chunk_overlap = 50
 separators = ["\n\n", "\n", ".", " ", ""]
 
 [memory]
-window_size = 8
+max_messages = 8
+keep_messages = 4
 summary_max_sentences = 5

@@ -8,7 +8,7 @@ from src.config import config
 from src.secrets import secrets
 from src.llm.state import AgentState
 from src.llm.retriever import get_retriever
-from src.utils.brief import format_brief_state, merge_list, is_str_complete, is_list_complete
+from src.utils.brief import format_brief_state, update_list, is_str_complete, is_list_complete
 from src.utils.docs import format_docs
 from src.utils.logger import get_logger
 
@@ -35,28 +35,48 @@ class RouterOutput(BaseModel):
     )
 
 
-class ExtractionOutput(BaseModel):
+class BriefUpdateOutput(BaseModel):
     project_type: str | None = Field(default=None)
     project_description: str | None = Field(default=None)
     goals: list[str] | None = Field(
         default=None,
-        description="Only NEW goal items not already in the brief state. Atomic and specific.",
+        description="NEW goal items to add. Atomic and specific. null if nothing to add.",
+    )
+    remove_goals: list[str] | None = Field(
+        default=None,
+        description="Exact goal items to remove (copy text verbatim from brief state). null if nothing to remove.",
     )
     key_features: list[str] | None = Field(
         default=None,
-        description="Only NEW items not already in the brief state. Atomic and specific.",
+        description="NEW key feature items to add. null if nothing to add.",
+    )
+    remove_key_features: list[str] | None = Field(
+        default=None,
+        description="Exact key feature items to remove (copy text verbatim from brief state). null if nothing to remove.",
     )
     additional_features: list[str] | None = Field(
         default=None,
-        description="Only NEW items not already in the brief state.",
+        description="NEW additional feature items to add. null if nothing to add.",
+    )
+    remove_additional_features: list[str] | None = Field(
+        default=None,
+        description="Exact additional feature items to remove (copy text verbatim from brief state). null if nothing to remove.",
     )
     integrations: list[str] | None = Field(
         default=None,
-        description="Only NEW integration items not already in the brief state.",
+        description="NEW integration items to add. null if nothing to add.",
+    )
+    remove_integrations: list[str] | None = Field(
+        default=None,
+        description="Exact integration items to remove (copy text verbatim from brief state). null if nothing to remove.",
     )
     client_materials: list[str] | None = Field(
         default=None,
-        description="Only NEW items not already in the brief state.",
+        description="NEW client material items to add. null if nothing to add.",
+    )
+    remove_client_materials: list[str] | None = Field(
+        default=None,
+        description="Exact client material items to remove (copy text verbatim from brief state). null if nothing to remove.",
     )
 
 
@@ -79,6 +99,14 @@ def _get_last_human(state: AgentState) -> HumanMessage:
 
 def _get_last_ai(state: AgentState) -> AIMessage | None:
     return next((m for m in reversed(state["messages"]) if isinstance(m, AIMessage)), None)
+
+
+def _build_history(state: AgentState, n: int = 4) -> tuple[str, list]:
+    """Return (summary, last_n_messages_before_current_human)."""
+    last_human = _get_last_human(state)
+    summary = state.get("summary", "") or ""
+    history = [m for m in state["messages"] if m is not last_human][-n:]
+    return summary, history
 
 
 # ── NODE 1: router_node ───────────────────────────────────────────────────
@@ -106,9 +134,7 @@ async def router_node(state: AgentState) -> dict:
         "класифікуй повідомлення користувача самостійно за його змістом."
     )
 
-    # Include recent conversation history so the router can interpret short
-    # replies (e.g. "так", "перший") as answers to earlier bot questions.
-    history = [m for m in state["messages"] if m is not last_human][-4:]
+    _, history = _build_history(state)
 
     result: RouterOutput = await llm.ainvoke([
         SystemMessage(system),
@@ -136,7 +162,7 @@ async def qna_node(state: AgentState) -> dict:
     docs = await retriever.ainvoke(f"query: {last_human.content}")
     context = format_docs(docs)
 
-    summary = state.get("summary", "")
+    summary, history = _build_history(state)
     system = (
             "Ви — AI-асистент компанії. Відповідайте на питання користувача ТІЛЬКИ на основі "
             "наданого контексту про компанію. Відповідь має бути чіткою та корисною.\n"
@@ -154,84 +180,66 @@ async def qna_node(state: AgentState) -> dict:
             + _HTML_FORMAT_RULE
     )
 
-    response = await _get_llm(0.3).ainvoke([SystemMessage(system), HumanMessage(last_human.content)])
+    response = await _get_llm(0.3).ainvoke([SystemMessage(system), *history, HumanMessage(last_human.content)])
     logger.info("qna_node completed")
     return {"qna_response": response.content}
 
 
-# ── NODE 3: extraction_node ───────────────────────────────────────────────
+# ── NODE 3: update_brief_node ─────────────────────────────────────────────
 
-async def extraction_node(state: AgentState) -> dict:
+async def update_brief_node(state: AgentState) -> dict:
     last_human = _get_last_human(state)
-    last_ai = _get_last_ai(state)
     brief_state = format_brief_state(state)
-    llm = _get_llm(0.0).with_structured_output(ExtractionOutput, method="json_schema")
-
-    context_block = ""
-    if last_ai:
-        context_block = (
-            f"\nОстаннє повідомлення асистента (контекст для інтерпретації відповіді):\n"
-            f"{last_ai.content}\n"
-        )
+    summary, history = _build_history(state)
+    llm = _get_llm(0.0).with_structured_output(BriefUpdateOutput, method="json_schema")
 
     system = (
-        "Витягніть інформацію про проєкт з повідомлення користувача і поверніть структуровані дані.\n\n"
-        "КРИТИЧНО — ЗАБОРОНА ВИГАДУВАННЯ:\n"
-        "• Витягуйте ТІЛЬКИ інформацію, яку користувач явно написав у повідомленні.\n"
+        "Оновіть бриф проєкту на основі повідомлення користувача.\n\n"
+        "Є два типи дій:\n"
+        "• ДОДАТИ — якщо користувач надає нову інформацію (відповідає на питання, уточнює деталі)\n"
+        "• ВИДАЛИТИ — якщо користувач просить прибрати або змінити вже наявну інформацію\n\n"
+        "ПРАВИЛА ДОДАВАННЯ:\n"
+        "• Витягуйте ТІЛЬКИ інформацію, яку користувач явно написав.\n"
         "• НЕ робіть висновків, НЕ припускайте, НЕ вигадуйте дані.\n"
-        "• НЕ додавайте типові або поширені функції для цього типу проєкту.\n"
-        "• Якщо користувач не згадав поле → поверніть null для цього поля.\n"
-        "• Повертайте лише те, що прямо присутнє в повідомленні користувача.\n\n"
-        "  Неправильно: користувач каже 'як Glovo' → ви додаєте 'онлайн-оплата',\n"
-        "               бо у Glovo є оплата\n"
-        "  Правильно:   користувач каже 'як Glovo' → не витягуєте нічого зайвого,\n"
-        "               чекаєте, поки користувач явно назве функції\n\n"
-        "КРИТИЧНІ ПРАВИЛА:\n"
-        "• Використовуйте останнє повідомлення асистента як контекст для інтерпретації:\n"
+        "• Використовуйте історію розмови як контекст для інтерпретації коротких відповідей:\n"
         "  — Якщо бот запитав про ОС і користувач відповів 'яблуко' → iOS/Apple\n"
-        "  — Якщо бот запитав про авторизацію і користувач відповів номер → авторизація за номером телефону\n"
-        "• Рядкові поля (project_type, project_description): якщо користувач відповів "
-        "'не знаю', 'без різниці', 'не важливо' → встановіть рядок 'не визначено'\n"
-        "• Поля-списки (goals, key_features, additional_features, integrations, client_materials): "
-        "якщо користувач відповів 'не знаю', 'не потрібно', 'без різниці', 'немає', 'не важливо' "
-        "у відповідь на запит про це поле → поверніть ['не визначено']\n"
-        "• Для полів без нової інформації поверніть null (не перезаписуйте існуючі дані)\n"
-        "• Деталізуйте атомарно і конкретно:\n"
-        "  Погано: 'авторизація'\n"
-        "  Добре: 'Авторизація за номером телефону через Telegram'\n"
-        "• Для всіх полів-списків повертайте ТІЛЬКИ нові пункти, "
-        "яких ще немає в поточному стані брифу\n\n"
+        "  — Якщо бот запитав про авторизацію і користувач відповів 'номер' → авторизація за номером телефону\n"
+        "• Рядкові поля: якщо користувач відповів 'не знаю', 'без різниці', 'не важливо' → 'не визначено'\n"
+        "• Поля-списки: якщо користувач відповів 'не потрібно', 'немає' → ['не визначено']\n"
+        "• Для полів без нової інформації поверніть null\n"
+        "• Деталізуйте атомарно і конкретно (не 'авторизація', а 'Авторизація за номером телефону')\n"
+        "• Для полів-списків повертайте ТІЛЬКИ нові пункти, яких ще немає в поточному стані\n\n"
+        "ПРАВИЛА ВИДАЛЕННЯ:\n"
+        "• Якщо користувач просить прибрати або змінити пункт — скопіюйте його текст ДОСЛІВНО з брифу\n"
+        "  в поле remove_*. Якщо змінює (замінює) — одночасно додайте новий варіант і видаліть старий.\n"
+        "• Не видаляйте нічого, про що користувач явно не просив.\n\n"
         f"═══ ПОТОЧНИЙ СТАН БРИФУ ═══\n{brief_state}"
-        f"{context_block}"
+        + (f"\n═══ СУМАРИЗАЦІЯ ПОПЕРЕДНЬОЇ РОЗМОВИ ═══\n{summary}\n" if summary else "")
     )
 
     logger.info(
-        f"extraction_node state received | "
+        f"update_brief_node state received | "
         f"project_type={state.get('project_type')!r} | "
-        f"project_description={state.get('project_description')!r} | "
         f"goals={state.get('goals')} | "
         f"key_features={state.get('key_features')} | "
-        f"additional_features={state.get('additional_features')} | "
-        f"integrations={state.get('integrations')} | "
-        f"client_materials={state.get('client_materials')}"
+        f"additional_features={state.get('additional_features')}"
     )
 
-    result: ExtractionOutput = await llm.ainvoke([
+    result: BriefUpdateOutput = await llm.ainvoke([
         SystemMessage(system),
+        *history,
         HumanMessage(last_human.content),
     ])
-    logger.info(f"extraction_node extracted | project_type={result.project_type}, features={result.key_features}")
+    logger.info(f"update_brief_node | add: key_features={result.key_features} | remove: {result.remove_key_features}")
 
-    # Merge with existing state — never overwrite a non-None/non-empty value with None/empty
     return {
         "project_type": result.project_type if result.project_type is not None else state.get("project_type"),
-        "project_description": result.project_description if result.project_description is not None else state.get(
-            "project_description"),
-        "goals": merge_list(state.get("goals") or [], result.goals),
-        "key_features": merge_list(state.get("key_features") or [], result.key_features),
-        "additional_features": merge_list(state.get("additional_features") or [], result.additional_features),
-        "integrations": merge_list(state.get("integrations") or [], result.integrations),
-        "client_materials": merge_list(state.get("client_materials") or [], result.client_materials),
+        "project_description": result.project_description if result.project_description is not None else state.get("project_description"),
+        "goals": update_list(state.get("goals") or [], result.goals, result.remove_goals),
+        "key_features": update_list(state.get("key_features") or [], result.key_features, result.remove_key_features),
+        "additional_features": update_list(state.get("additional_features") or [], result.additional_features, result.remove_additional_features),
+        "integrations": update_list(state.get("integrations") or [], result.integrations, result.remove_integrations),
+        "client_materials": update_list(state.get("client_materials") or [], result.client_materials, result.remove_client_materials),
     }
 
 
@@ -283,6 +291,7 @@ async def clarifying_node(state: AgentState) -> dict:
     empty_fields = state.get("empty_fields") or []
     qna_response = state.get("qna_response")
     project_type = state.get("project_type")
+    summary, history = _build_history(state)
 
     # Ask about at most 1 field when project type is unknown, else 2 fields
     fields_to_ask = empty_fields[:1] if not project_type else empty_fields[:2]
@@ -332,7 +341,8 @@ async def clarifying_node(state: AgentState) -> dict:
         f"{task_instruction}\n"
         f"Поля для уточнення:\n{fields_info}\n"
         f"═══ ПОТОЧНИЙ СТАН БРИФУ (тільки для вас) ═══\n{brief_state}\n\n"
-        "Правила форматування:\n"
+        + (f"═══ СУМАРИЗАЦІЯ ПОПЕРЕДНЬОЇ РОЗМОВИ ═══\n{summary}\n\n" if summary else "")
+        + "Правила форматування:\n"
         "• Тільки українська мова\n"
         "• Telegram HTML: <b>жирний</b>, <i>курсив</i>\n"
         "• НЕ використовуйте Markdown (**, __ тощо)\n"
@@ -341,7 +351,7 @@ async def clarifying_node(state: AgentState) -> dict:
         "• НЕ показуйте стан брифу або назви полів у відповіді\n"
     )
 
-    response = await _get_llm(0.7).ainvoke([SystemMessage(system)])
+    response = await _get_llm(0.7).ainvoke([SystemMessage(system), *history])
     logger.info("clarifying_node completed")
     return {
         "messages": [AIMessage(content=response.content)],
@@ -462,8 +472,9 @@ async def estimation_node(state: AgentState) -> dict:
 
 async def summarize_node(state: AgentState) -> dict:
     messages = state["messages"]
-    old_messages = messages[:-config.memory.window_size]
-    existing_summary = state.get("summary", "")
+    # Keep the newest keep_messages; compress everything older
+    old_messages = messages[:-config.memory.keep_messages]
+    existing_summary = state.get("summary", "") or ""
 
     formatted = "\n".join(
         f"{'User' if isinstance(m, HumanMessage) else 'Assistant'}: {m.content}"
@@ -476,7 +487,7 @@ async def summarize_node(state: AgentState) -> dict:
     )
 
     response = await _get_llm(config.llm.temperature).ainvoke([HumanMessage(summary_prompt)])
-    logger.info(f"Summarized {len(old_messages)} old messages, trimming state")
+    logger.info(f"Summarized {len(old_messages)} old messages, keeping last {config.memory.keep_messages}")
 
     return {
         "messages": [RemoveMessage(id=m.id) for m in old_messages],

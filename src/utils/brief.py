@@ -20,6 +20,15 @@ def format_brief_state(state: AgentState) -> str:
     )
 
 
+def update_list(existing: list[str], add: list[str] | None, remove: list[str] | None) -> list[str]:
+    """Apply additions then removals to a list field. Removal is case-insensitive."""
+    result = merge_list(existing, add)
+    if remove:
+        remove_lower = {r.lower() for r in remove}
+        result = [item for item in result if item.lower() not in remove_lower]
+    return result
+
+
 def merge_list(existing: list[str], new_items: list[str] | None) -> list[str]:
     """Merge two lists deduplicating items.
 

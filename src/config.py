@@ -36,7 +36,8 @@ class TextSplitterConfig(BaseModel):
 
 
 class MemoryConfig(BaseModel):
-    window_size: int
+    max_messages: int
+    keep_messages: int
     summary_max_sentences: int
 
 
