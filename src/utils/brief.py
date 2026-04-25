@@ -1,7 +1,18 @@
-from src.llm.state import AgentState
+from langchain_core.messages import HumanMessage
+
+# Maps validation_node's Ukrainian display names → internal snake_case field keys
+FIELD_KEY_MAP: dict[str, str] = {
+    "Тип проєкту": "project_type",
+    "Опис проєкту": "project_description",
+    "Цілі": "goals",
+    "Ключовий функціонал": "key_features",
+    "Додатковий функціонал": "additional_features",
+    "Інтеграції": "integrations",
+    "Матеріали від клієнта": "client_materials",
+}
 
 
-def format_brief_state(state: AgentState) -> str:
+def format_brief_state(brief: dict) -> str:
     def fmt(val):
         if val is None:
             return "не заповнено"
@@ -10,44 +21,27 @@ def format_brief_state(state: AgentState) -> str:
         return str(val) if val else "не заповнено"
 
     return (
-        f"Тип проєкту: {fmt(state.get('project_type'))}\n"
-        f"Опис проєкту: {fmt(state.get('project_description'))}\n"
-        f"Цілі: {fmt(state.get('goals', []))}\n"
-        f"Ключовий функціонал: {fmt(state.get('key_features', []))}\n"
-        f"Додатковий функціонал: {fmt(state.get('additional_features', []))}\n"
-        f"Інтеграції: {fmt(state.get('integrations', []))}\n"
-        f"Матеріали від клієнта: {fmt(state.get('client_materials', []))}\n"
+        f"Тип проєкту: {fmt(brief.get('project_type'))}\n"
+        f"Опис проєкту: {fmt(brief.get('project_description'))}\n"
+        f"Цілі: {fmt(brief.get('goals', []))}\n"
+        f"Ключовий функціонал: {fmt(brief.get('key_features', []))}\n"
+        f"Додатковий функціонал: {fmt(brief.get('additional_features', []))}\n"
+        f"Інтеграції: {fmt(brief.get('integrations', []))}\n"
+        f"Матеріали від клієнта: {fmt(brief.get('client_materials', []))}\n"
     )
 
 
-def update_list(existing: list[str], add: list[str] | None, remove: list[str] | None) -> list[str]:
-    """Apply additions then removals to a list field. Removal is case-insensitive."""
-    result = merge_list(existing, add)
-    if remove:
-        remove_lower = {r.lower() for r in remove}
-        result = [item for item in result if item.lower() not in remove_lower]
-    return result
-
-
-def merge_list(existing: list[str], new_items: list[str] | None) -> list[str]:
-    """Merge two lists deduplicating items.
-
-    Rules:
-    - Real data replaces a ['не визначено'] placeholder.
-    - 'не визначено' is ignored when real data already exists.
-    - Otherwise new items are appended without duplicates.
-    """
-    if not new_items:
-        return existing
-    if existing == ["не визначено"]:
-        return new_items
-    if "не визначено" in new_items and existing:
-        return existing
-    return existing + [i for i in new_items if i not in existing]
+def build_history(state: dict, n: int = 4):
+    """Return (summary, last_n_messages_before_current_human)."""
+    last_human = next(m for m in reversed(state["messages"]) if isinstance(m, HumanMessage))
+    summary = state.get("summary", "") or ""
+    history = [m for m in state["messages"] if m is not last_human][-n:]
+    return summary, history
 
 
 def is_str_complete(val: str | None) -> bool:
-    return bool(val and val != "не визначено")
+    # "не визначено" counts as a determined answer
+    return bool(val)
 
 
 def is_list_complete(val: list[str], min_items: int = 1) -> bool:

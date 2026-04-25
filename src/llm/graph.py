@@ -3,7 +3,6 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.mongodb.saver import MongoDBSaver
 from langgraph.types import Send
 
-from src.config import config
 from src.llm.state import AgentState
 from src.llm.nodes import (
     router_node,
@@ -22,13 +21,9 @@ def _route_from_start(state: AgentState) -> str:
     last = next((m for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), None)
     if last and last.content == "__ESTIMATE__":
         return "estimation_node"
+    if len(state["messages"]) >= 9:
+        return "summarize_node"
     return "router_node"
-
-
-def _should_summarize(state: AgentState) -> str:
-    if len(state["messages"]) >= config.memory.max_messages:
-        return "summarize"
-    return END
 
 
 def _route_from_router(state: AgentState):
@@ -39,7 +34,6 @@ def _route_from_router(state: AgentState):
         sends.append(Send("qna_node", state))
     if state.get("has_project_info"):
         sends.append(Send("update_brief_node", state))
-    # Fallback: if neither flag is set treat as nonsense
     return sends if sends else "nonsense_node"
 
 
@@ -52,6 +46,7 @@ def _route_from_validation(state: AgentState) -> str:
 def build_graph(checkpointer: MongoDBSaver):
     builder = StateGraph(AgentState)
 
+    builder.add_node("summarize_node", summarize_node)
     builder.add_node("router_node", router_node)
     builder.add_node("qna_node", qna_node)
     builder.add_node("update_brief_node", update_brief_node)
@@ -59,18 +54,23 @@ def build_graph(checkpointer: MongoDBSaver):
     builder.add_node("clarifying_node", clarifying_node)
     builder.add_node("brief_format_node", brief_format_node)
     builder.add_node("nonsense_node", nonsense_node)
-    builder.add_node("summarize", summarize_node)
     builder.add_node("estimation_node", estimation_node)
 
-    # Entry point — bypass router for estimate trigger
+    # Entry point — summarize if needed, or go directly to router/estimation
     builder.add_conditional_edges(
         START,
         _route_from_start,
-        {"estimation_node": "estimation_node", "router_node": "router_node"},
+        {
+            "estimation_node": "estimation_node",
+            "summarize_node": "summarize_node",
+            "router_node": "router_node",
+        },
     )
 
+    # Summarize always continues to router
+    builder.add_edge("summarize_node", "router_node")
+
     # Fan-out: router → parallel qna/extraction (via Send) or nonsense
-    # path_map is a visualizer hint — Send() handles actual routing at runtime
     builder.add_conditional_edges(
         "router_node",
         _route_from_router,
@@ -88,14 +88,9 @@ def build_graph(checkpointer: MongoDBSaver):
         {"brief_format_node": "brief_format_node", "clarifying_node": "clarifying_node"},
     )
 
-    # Terminal nodes → summarize or END
+    # Terminal nodes → END
     for terminal in ["nonsense_node", "clarifying_node", "brief_format_node", "estimation_node"]:
-        builder.add_conditional_edges(
-            terminal,
-            _should_summarize,
-            {"summarize": "summarize", END: END},
-        )
-    builder.add_edge("summarize", END)
+        builder.add_edge(terminal, END)
 
     return builder.compile(checkpointer=checkpointer)
 
@@ -109,20 +104,22 @@ async def reset_state_async(graph, thread_id: str) -> None:
             cfg,
             {
                 "messages": [RemoveMessage(id=m.id) for m in messages],
-                "summary": "",
-                "project_type": None,
-                "project_description": None,
-                "goals": [],
-                "key_features": [],
-                "additional_features": [],
-                "integrations": [],
-                "client_materials": [],
+                "summary": None,
+                "brief": {
+                    "project_type": None,
+                    "project_description": None,
+                    "goals": [],
+                    "key_features": [],
+                    "additional_features": [],
+                    "integrations": [],
+                    "client_materials": [],
+                },
+                "rejected_options": {},
                 "estimation": None,
                 "brief_status": "in_progress",
                 "response_type": "brief_clarifying",
                 "qna_response": None,
                 "empty_fields": [],
-                "weak_fields": [],
             },
         )
 

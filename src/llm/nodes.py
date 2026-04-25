@@ -8,15 +8,22 @@ from src.config import config
 from src.secrets import secrets
 from src.llm.state import AgentState
 from src.llm.retriever import get_retriever
-from src.utils.brief import format_brief_state, update_list, is_str_complete, is_list_complete
+from src.utils.brief import format_brief_state, build_history, FIELD_KEY_MAP, is_str_complete, is_list_complete
 from src.utils.docs import format_docs
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 _HTML_FORMAT_RULE = (
-    "Використовуй ТІЛЬКИ ці Telegram HTML теги: <b>, <i>.\n"
-    "НЕ використовуй <br>, <p>, <div>, <span>, <h1>–<h6> або будь-які інші HTML теги.\n"
+    "Правила форматування Telegram HTML:\n"
+    "• <b>жирний</b> — ТІЛЬКИ для назв технологій та абревіатур (Android, iOS, CRM, API, UX, UI тощо)\n"
+    "• <i>курсив</i> — ТІЛЬКИ для питань\n"
+    "• Списки варіантів та пункти — маркований список (• пункт) без тегів\n"
+    "• В усіх інших випадках — звичайний текст без тегів\n"
+    "• НЕ використовуй <b> для заголовків, підкреслення важливості або будь-чого іншого\n"
+    "• НЕ використовуй <i> для дисклеймерів, підказок або будь-чого крім питань\n"
+    "• НЕ використовуй <br>, <p>, <div>, <span>, <h1>–<h6> або будь-які інші HTML теги\n"
+    "• НЕ використовуй Markdown (**, __ тощо)\n"
 )
 
 
@@ -40,43 +47,37 @@ class BriefUpdateOutput(BaseModel):
     project_description: str | None = Field(default=None)
     goals: list[str] | None = Field(
         default=None,
-        description="NEW goal items to add. Atomic and specific. null if nothing to add.",
-    )
-    remove_goals: list[str] | None = Field(
-        default=None,
-        description="Exact goal items to remove (copy text verbatim from brief state). null if nothing to remove.",
+        description="Complete updated goals list, or null if no change.",
     )
     key_features: list[str] | None = Field(
         default=None,
-        description="NEW key feature items to add. null if nothing to add.",
-    )
-    remove_key_features: list[str] | None = Field(
-        default=None,
-        description="Exact key feature items to remove (copy text verbatim from brief state). null if nothing to remove.",
+        description="Complete updated key features list, or null if no change.",
     )
     additional_features: list[str] | None = Field(
         default=None,
-        description="NEW additional feature items to add. null if nothing to add.",
-    )
-    remove_additional_features: list[str] | None = Field(
-        default=None,
-        description="Exact additional feature items to remove (copy text verbatim from brief state). null if nothing to remove.",
+        description="Complete updated additional features list, or null if no change.",
     )
     integrations: list[str] | None = Field(
         default=None,
-        description="NEW integration items to add. null if nothing to add.",
-    )
-    remove_integrations: list[str] | None = Field(
-        default=None,
-        description="Exact integration items to remove (copy text verbatim from brief state). null if nothing to remove.",
+        description="Complete updated integrations list, or null if no change.",
     )
     client_materials: list[str] | None = Field(
         default=None,
-        description="NEW client material items to add. null if nothing to add.",
+        description="Complete updated client materials list, or null if no change.",
     )
-    remove_client_materials: list[str] | None = Field(
+    rejected_field: str | None = Field(
         default=None,
-        description="Exact client material items to remove (copy text verbatim from brief state). null if nothing to remove.",
+        description=(
+            "Internal snake_case field name if the user is clearly rejecting or refusing "
+            "the options/suggestions offered for a specific brief field. "
+            "Set ONLY when user says something like 'none of these work', 'don't need any of that', "
+            "'already told you', 'nothing fits', 'нічого з цього', 'жоден не підходить', "
+            "'не потрібно нічого з перерахованого'. "
+            "Analyze the last assistant message to determine which field was being discussed. "
+            "Valid values: project_type, project_description, goals, key_features, "
+            "additional_features, integrations, client_materials. "
+            "null if there is no clear rejection of offered options."
+        ),
     )
 
 
@@ -99,14 +100,6 @@ def _get_last_human(state: AgentState) -> HumanMessage:
 
 def _get_last_ai(state: AgentState) -> AIMessage | None:
     return next((m for m in reversed(state["messages"]) if isinstance(m, AIMessage)), None)
-
-
-def _build_history(state: AgentState, n: int = 4) -> tuple[str, list]:
-    """Return (summary, last_n_messages_before_current_human)."""
-    last_human = _get_last_human(state)
-    summary = state.get("summary", "") or ""
-    history = [m for m in state["messages"] if m is not last_human][-n:]
-    return summary, history
 
 
 # ── NODE 1: router_node ───────────────────────────────────────────────────
@@ -134,7 +127,7 @@ async def router_node(state: AgentState) -> dict:
         "класифікуй повідомлення користувача самостійно за його змістом."
     )
 
-    _, history = _build_history(state)
+    _, history = build_history(state)
 
     result: RouterOutput = await llm.ainvoke([
         SystemMessage(system),
@@ -142,7 +135,7 @@ async def router_node(state: AgentState) -> dict:
         HumanMessage(last_human.content),
     ])
     logger.info(
-        f"Router: has_question={result.has_question}, "
+        f"router_node: has_question={result.has_question}, "
         f"has_project_info={result.has_project_info}, "
         f"is_nonsense={result.is_nonsense}"
     )
@@ -150,7 +143,7 @@ async def router_node(state: AgentState) -> dict:
         "has_question": result.has_question,
         "has_project_info": result.has_project_info,
         "is_nonsense": result.is_nonsense,
-        "qna_response": None,  # Clear stale value from previous turn
+        "qna_response": None,  # clear stale value from previous turn
     }
 
 
@@ -159,10 +152,30 @@ async def router_node(state: AgentState) -> dict:
 async def qna_node(state: AgentState) -> dict:
     last_human = _get_last_human(state)
     retriever = get_retriever()
-    docs = await retriever.ainvoke(f"query: {last_human.content}")
+    summary, history = build_history(state)
+
+    logger.info(f"qna_node entry | summary={'present' if summary else 'none'} | history_len={len(history)}")
+
+    # Rewrite context-dependent questions into self-contained search queries
+    if history:
+        rewrite_system = (
+            "Перепиши запит користувача у самодостатній пошуковий запит без займенників "
+            "та посилань на контекст розмови. Поверни ТІЛЬКИ перефразований запит без пояснень. "
+            "Якщо запит вже самодостатній — поверни його без змін."
+        )
+        rewritten = await _get_llm(0.0).ainvoke([
+            SystemMessage(rewrite_system),
+            *history[-2:],
+            HumanMessage(last_human.content),
+        ])
+        search_query = rewritten.content.strip()
+        logger.info(f"qna_node: original={last_human.content!r} | rewritten={search_query!r}")
+    else:
+        search_query = last_human.content
+
+    docs = await retriever.ainvoke(f"query: {search_query}")
     context = format_docs(docs)
 
-    summary, history = _build_history(state)
     system = (
             "Ви — AI-асистент компанії. Відповідайте на питання користувача ТІЛЬКИ на основі "
             "наданого контексту про компанію. Відповідь має бути чіткою та корисною.\n"
@@ -175,8 +188,7 @@ async def qna_node(state: AgentState) -> dict:
             "═══ КОНТЕКСТ ПРО КОМПАНІЮ ═══\n"
             f"{context}\n"
             + (f"\n═══ СУМАРИЗАЦІЯ ПОПЕРЕДНЬОЇ РОЗМОВИ ═══\n{summary}\n" if summary else "")
-            + "\nМова відповіді: виключно українська. "
-              "Форматування: Telegram HTML (<b>, <i>). Не використовуйте Markdown (**, __ тощо).\n"
+            + "\nМова відповіді: виключно українська.\n"
             + _HTML_FORMAT_RULE
     )
 
@@ -189,40 +201,47 @@ async def qna_node(state: AgentState) -> dict:
 
 async def update_brief_node(state: AgentState) -> dict:
     last_human = _get_last_human(state)
-    brief_state = format_brief_state(state)
-    summary, history = _build_history(state)
+    last_ai = _get_last_ai(state)
+    brief = state.get("brief") or {}
+    brief_state = format_brief_state(brief)
+    summary, history = build_history(state)
     llm = _get_llm(0.0).with_structured_output(BriefUpdateOutput, method="json_schema")
+
+    logger.info(f"update_brief_node entry | brief={brief}")
+
+    last_ai_block = (
+        f"═══ ПОПЕРЕДНЄ ПОВІДОМЛЕННЯ АСИСТЕНТА ═══\n{last_ai.content}\n\n"
+        if last_ai else ""
+    )
 
     system = (
         "Оновіть бриф проєкту на основі повідомлення користувача.\n\n"
-        "Є два типи дій:\n"
-        "• ДОДАТИ — якщо користувач надає нову інформацію (відповідає на питання, уточнює деталі)\n"
-        "• ВИДАЛИТИ — якщо користувач просить прибрати або змінити вже наявну інформацію\n\n"
-        "ПРАВИЛА ДОДАВАННЯ:\n"
+        "ПРАВИЛА:\n"
         "• Витягуйте ТІЛЬКИ інформацію, яку користувач явно написав.\n"
         "• НЕ робіть висновків, НЕ припускайте, НЕ вигадуйте дані.\n"
-        "• Використовуйте історію розмови як контекст для інтерпретації коротких відповідей:\n"
+        "• Використовуйте попереднє повідомлення асистента як контекст для інтерпретації коротких відповідей:\n"
         "  — Якщо бот запитав про ОС і користувач відповів 'яблуко' → iOS/Apple\n"
         "  — Якщо бот запитав про авторизацію і користувач відповів 'номер' → авторизація за номером телефону\n"
         "• Рядкові поля: якщо користувач відповів 'не знаю', 'без різниці', 'не важливо' → 'не визначено'\n"
-        "• Поля-списки: якщо користувач відповів 'не потрібно', 'немає' → ['не визначено']\n"
+        "• Поля-списки: НЕ записуйте ['не визначено'] самостійно — це робиться автоматично після двох відмов.\n"
+        "  Якщо користувач відхиляє запропоновані варіанти → встановіть rejected_field, але залиште поле null.\n"
+        "  Якщо користувач каже що певна категорія йому взагалі не потрібна і це НЕ відповідь на конкретні\n"
+        "  запропоновані варіанти (наприклад, 'інтеграцій взагалі не буде') → тоді записуйте ['не визначено'].\n"
         "• Для полів без нової інформації поверніть null\n"
         "• Деталізуйте атомарно і конкретно (не 'авторизація', а 'Авторизація за номером телефону')\n"
-        "• Для полів-списків повертайте ТІЛЬКИ нові пункти, яких ще немає в поточному стані\n\n"
-        "ПРАВИЛА ВИДАЛЕННЯ:\n"
-        "• Якщо користувач просить прибрати або змінити пункт — скопіюйте його текст ДОСЛІВНО з брифу\n"
-        "  в поле remove_*. Якщо змінює (замінює) — одночасно додайте новий варіант і видаліть старий.\n"
-        "• Не видаляйте нічого, про що користувач явно не просив.\n\n"
+        "• Для полів-списків — якщо є зміни, поверніть ПОВНИЙ оновлений список (не лише нові пункти)\n"
+        "  Ви бачите поточний стан брифу — враховуйте наявні пункти і зберігайте їх якщо немає вказівок видалити\n"
+        "• Якщо користувач змінює щось ('замість А зробимо Б') — поверніть повний список з урахуванням змін\n"
+        "• НЕ пропонуйте та НЕ включайте: Яндекс.Метрика, 1С, AmoCRM та інші російські продукти\n\n"
+        "ВИЗНАЧЕННЯ ВІДХИЛЕННЯ (rejected_field):\n"
+        "• Якщо користувач відхиляє запропоновані варіанти ('жоден не підходить', 'нічого з цього',\n"
+        "  'вже казав', 'це не те', 'ні на жоден', 'не потрібно нічого з перерахованого') —\n"
+        "  проаналізуй ПОПЕРЕДНЄ ПОВІДОМЛЕННЯ АСИСТЕНТА і визнач яке поле обговорювалось.\n"
+        "  Заповни rejected_field відповідною назвою поля (snake_case).\n"
+        "• НЕ заповнюй rejected_field якщо користувач просто уточнює або дає нову інформацію.\n\n"
+        f"{last_ai_block}"
         f"═══ ПОТОЧНИЙ СТАН БРИФУ ═══\n{brief_state}"
         + (f"\n═══ СУМАРИЗАЦІЯ ПОПЕРЕДНЬОЇ РОЗМОВИ ═══\n{summary}\n" if summary else "")
-    )
-
-    logger.info(
-        f"update_brief_node state received | "
-        f"project_type={state.get('project_type')!r} | "
-        f"goals={state.get('goals')} | "
-        f"key_features={state.get('key_features')} | "
-        f"additional_features={state.get('additional_features')}"
     )
 
     result: BriefUpdateOutput = await llm.ainvoke([
@@ -230,37 +249,64 @@ async def update_brief_node(state: AgentState) -> dict:
         *history,
         HumanMessage(last_human.content),
     ])
-    logger.info(f"update_brief_node | add: key_features={result.key_features} | remove: {result.remove_key_features}")
+
+    # Merge: never overwrite with None; for list fields replace entirely when provided
+    new_brief: dict = {
+        "project_type": result.project_type if result.project_type is not None else brief.get("project_type"),
+        "project_description": result.project_description if result.project_description is not None else brief.get("project_description"),
+        "goals": result.goals if result.goals is not None else (brief.get("goals") or []),
+        "key_features": result.key_features if result.key_features is not None else (brief.get("key_features") or []),
+        "additional_features": result.additional_features if result.additional_features is not None else (brief.get("additional_features") or []),
+        "integrations": result.integrations if result.integrations is not None else (brief.get("integrations") or []),
+        "client_materials": result.client_materials if result.client_materials is not None else (brief.get("client_materials") or []),
+    }
+
+    # Rejection tracking
+    rejected_options = dict(state.get("rejected_options") or {})
+    valid_fields = {"project_type", "project_description", "goals", "key_features", "additional_features", "integrations", "client_materials"}
+
+    if result.rejected_field and result.rejected_field in valid_fields:
+        field = result.rejected_field
+        current = rejected_options.get(field, {"options": [], "counts": 0, "last_rejection_message_id": ""})
+
+        if current.get("last_rejection_message_id") == last_human.id:
+            logger.info(f"update_brief_node | skipping duplicate rejection for '{field}' (already counted for message {last_human.id})")
+        else:
+            new_counts = current["counts"] + 1
+
+            if new_counts >= 2:
+                logger.info(f"update_brief_node | auto-closing field '{field}' as 'не визначено'")
+                if field in ("project_type", "project_description"):
+                    new_brief[field] = "не визначено"
+                else:
+                    new_brief[field] = ["не визначено"]
+
+            rejected_options[field] = {
+                "options": current["options"],
+                "counts": new_counts,
+                "last_rejection_message_id": last_human.id,
+            }
+            logger.info(f"update_brief_node | rejection for '{field}': counts={new_counts}")
+
+    logger.info(f"update_brief_node result | brief={new_brief} | rejected_options={rejected_options}")
 
     return {
-        "project_type": result.project_type if result.project_type is not None else state.get("project_type"),
-        "project_description": result.project_description if result.project_description is not None else state.get("project_description"),
-        "goals": update_list(state.get("goals") or [], result.goals, result.remove_goals),
-        "key_features": update_list(state.get("key_features") or [], result.key_features, result.remove_key_features),
-        "additional_features": update_list(state.get("additional_features") or [], result.additional_features, result.remove_additional_features),
-        "integrations": update_list(state.get("integrations") or [], result.integrations, result.remove_integrations),
-        "client_materials": update_list(state.get("client_materials") or [], result.client_materials, result.remove_client_materials),
+        "brief": new_brief,
+        "rejected_options": rejected_options,
     }
 
 
 # ── NODE 4: validation_node ───────────────────────────────────────────────
 
 async def validation_node(state: AgentState) -> dict:
-    logger.info(
-        f"validation INPUT: "
-        f"project_type={state.get('project_type')}, "
-        f"goals={state.get('goals')}, "
-        f"key_features={state.get('key_features')}, "
-        f"additional_features={state.get('additional_features')}, "
-        f"integrations={state.get('integrations')}, "
-        f"client_materials={state.get('client_materials')}"
-    )
+    brief = state.get("brief") or {}
+    logger.info(f"validation_node entry | brief={brief}")
 
     empty_fields: list[str] = []
 
-    if not is_str_complete(state.get("project_type")):
+    if not is_str_complete(brief.get("project_type")):
         empty_fields.append("Тип проєкту")
-    if not is_str_complete(state.get("project_description")):
+    if not is_str_complete(brief.get("project_description")):
         empty_fields.append("Опис проєкту")
 
     list_checks = [
@@ -271,7 +317,7 @@ async def validation_node(state: AgentState) -> dict:
         ("Матеріали від клієнта", "client_materials", 1),
     ]
     for name, field, min_items in list_checks:
-        if not is_list_complete(state.get(field) or [], min_items):
+        if not is_list_complete(brief.get(field) or [], min_items):
             empty_fields.append(name)
 
     brief_status = "complete" if not empty_fields else "in_progress"
@@ -280,22 +326,34 @@ async def validation_node(state: AgentState) -> dict:
     return {
         "brief_status": brief_status,
         "empty_fields": empty_fields,
-        "weak_fields": [],
     }
 
 
 # ── NODE 5: clarifying_node ───────────────────────────────────────────────
 
 async def clarifying_node(state: AgentState) -> dict:
-    brief_state = format_brief_state(state)
+    brief = state.get("brief") or {}
+    brief_state = format_brief_state(brief)
     empty_fields = state.get("empty_fields") or []
     qna_response = state.get("qna_response")
-    project_type = state.get("project_type")
-    summary, history = _build_history(state)
+    project_type = brief.get("project_type")
+    summary, history = build_history(state)
+    rejected_options = state.get("rejected_options") or {}
 
-    # Ask about at most 1 field when project type is unknown, else 2 fields
-    fields_to_ask = empty_fields[:1] if not project_type else empty_fields[:2]
-    fields_info = f"Відсутні поля: {', '.join(fields_to_ask)}\n" if fields_to_ask else ""
+    logger.info(f"clarifying_node entry | empty_fields={empty_fields} | rejected_options={rejected_options}")
+
+    # Filter fields auto-closed (counts >= 2)
+    active_fields = [
+        f for f in empty_fields
+        if rejected_options.get(FIELD_KEY_MAP.get(f, f), {}).get("counts", 0) < 2
+    ]
+
+    # Max 1 field if project_type unknown, else max 2
+    fields_to_ask = active_fields[:1] if not project_type else active_fields[:2]
+
+    # Categorize by attempt count
+    first_attempt = [f for f in fields_to_ask if rejected_options.get(FIELD_KEY_MAP.get(f, f), {}).get("counts", 0) == 0]
+    second_attempt = [f for f in fields_to_ask if rejected_options.get(FIELD_KEY_MAP.get(f, f), {}).get("counts", 0) == 1]
 
     qna_block = ""
     if qna_response:
@@ -308,62 +366,108 @@ async def clarifying_node(state: AgentState) -> dict:
     if not project_type:
         task_instruction = (
             "Тип проєкту ще невідомий. Запитайте що хоче створити користувач і "
-            "запропонуйте конкретні варіанти:\n"
-            "1. Telegram-бот\n"
-            "2. Веб-сайт або веб-застосунок\n"
-            "3. Мобільний застосунок (iOS, Android)\n"
-            "4. CRM або внутрішня система для бізнесу\n"
-            "Сформулюйте питання природньо, без нумерації у відповіді — просто перелічте варіанти.\n"
+            "запропонуйте конкретні варіанти маркованим списком:\n"
+            "• Telegram-бот\n"
+            "• Веб-сайт або веб-застосунок\n"
+            "• Мобільний застосунок (<b>iOS</b>, <b>Android</b>)\n"
+            "• CRM або внутрішня система для бізнесу\n"
+            "Питання оформіть курсивом (<i>), варіанти — маркованим списком без тегів.\n"
         )
     else:
+        first_attempt_instruction = ""
+        if first_attempt:
+            first_attempt_instruction = (
+                f"Тип проєкту відомий: {project_type}. Дійте як досвідчений бізнес-аналітик.\n\n"
+                f"Для полів {', '.join(first_attempt)} — запропонуйте 2-3 конкретних типових варіанти "
+                "саме для цього типу проєкту і задайте чітке питання.\n"
+                "НЕ пояснюйте чому це питання важливе — просто питайте природньо.\n"
+                "НЕ пропонуйте та НЕ включайте: Яндекс.Метрика, 1С, AmoCRM та інші російські продукти.\n\n"
+                "Приклад для авторизації в університетському боті:\n"
+                "<i>Як користувачі будуть входити в систему?</i> Для університетських ботів зазвичай:\n"
+                "• Номер телефону — ділиться через Telegram, звіряється з базою університету\n"
+                "• Студентський ID — вводять вручну\n"
+                "• <b>SSO</b> університету — якщо є корпоративна система\n"
+                "<i>Який варіант підходить?</i>\n\n"
+            )
+
+        second_attempt_instruction = ""
+        if second_attempt:
+            prev_opts_block = ""
+            for f in second_attempt:
+                key = FIELD_KEY_MAP.get(f, f)
+                opts = rejected_options.get(key, {}).get("options", [])
+                if opts:
+                    prev_opts_block += f"Поле «{f}» — раніше пропонувалось:\n" + "\n".join(opts[:2]) + "\n\n"
+
+            second_attempt_instruction = (
+                f"Для полів {', '.join(second_attempt)} — користувач вже відхилив запропоновані варіанти.\n"
+                "НЕ повторюйте попередні варіанти.\n"
+                + (f"Раніше пропоновані варіанти (НЕ повторювати):\n{prev_opts_block}" if prev_opts_block else "")
+                + "Визнайте що попередні варіанти не підійшли.\n"
+                "Починайте з 'Можемо запропонувати інші варіанти...' і пропонуйте зовсім інші альтернативи,\n"
+                "або задайте відкрите питання: 'Що саме підійшло б для вас?', "
+                "'Розкажіть детальніше — що саме потрібно?'\n\n"
+            )
+
         task_instruction = (
-            f"Тип проєкту відомий: {project_type}. Дійте як досвідчений бізнес-аналітик.\n\n"
-            "Для кожного відсутнього поля:\n"
-            "1. Запропонуйте 2-3 конкретних типових варіанти саме для цього типу проєкту\n"
-            "2. Задайте чітке питання\n"
-            "НЕ пояснюйте чому це питання важливе — просто питайте природньо.\n\n"
-            "Приклад для авторизації в університетському боті:\n"
-            "<i>Як користувачі будуть входити в систему? Для університетських ботів зазвичай:\n"
-            "• Номер телефону — ділиться через Telegram, звіряється з базою університету\n"
-            "• Студентський ID — вводять вручну\n"
-            "• SSO університету — якщо є корпоративна система\n"
-            "Який варіант підходить?</i>\n\n"
-            "Задавай питання максимум про 1-2 незаповнених поля за раз.\n"
-            "Не намагайся заповнити всі поля в одному повідомленні.\n"
+            first_attempt_instruction
+            + second_attempt_instruction
+            + "Задавай питання максимум про 1-2 незаповнених поля за раз.\n"
             "Обери найважливіші поля і задай питання тільки про них.\n"
-            "В наступному повідомленні перейдеш до інших полів.\n"
-            "НЕ питайте про поля зі значенням 'не визначено' — вони вже визначені.\n"
         )
+
+    fields_info = f"Відсутні поля: {', '.join(fields_to_ask)}\n" if fields_to_ask else ""
 
     system = (
         "Ви — AI-асистент компанії, що збирає бриф проєкту.\n\n"
+        "ВАЖЛИВО: Перед тим як формувати питання, перегляньте ВСЮ ІСТОРІЮ РОЗМОВИ нижче.\n"
+        "• НЕ повторюйте варіанти або питання, які вже були задані раніше.\n"
+        "• НЕ питайте про теми, які вже обговорювались, навіть якщо поле технічно порожнє.\n"
+        "• Враховуйте контекст попередніх відповідей користувача.\n"
+        "• НЕ питайте про поля зі значенням 'не визначено' — вони вже закриті.\n\n"
         f"{qna_block}"
         f"{task_instruction}\n"
         f"Поля для уточнення:\n{fields_info}\n"
         f"═══ ПОТОЧНИЙ СТАН БРИФУ (тільки для вас) ═══\n{brief_state}\n\n"
         + (f"═══ СУМАРИЗАЦІЯ ПОПЕРЕДНЬОЇ РОЗМОВИ ═══\n{summary}\n\n" if summary else "")
-        + "Правила форматування:\n"
-        "• Тільки українська мова\n"
-        "• Telegram HTML: <b>жирний</b>, <i>курсив</i>\n"
-        "• НЕ використовуйте Markdown (**, __ тощо)\n"
-        + _HTML_FORMAT_RULE +
-        "• НЕ називайте технічних назв полів (project_type, goals тощо)\n"
+        + "Тільки українська мова.\n"
+        + _HTML_FORMAT_RULE
+        + "• НЕ називайте технічних назв полів (project_type, goals тощо)\n"
         "• НЕ показуйте стан брифу або назви полів у відповіді\n"
     )
 
     response = await _get_llm(0.7).ainvoke([SystemMessage(system), *history])
-    logger.info("clarifying_node completed")
+
+    # Store offered response in rejected_options for first-attempt fields so
+    # the next clarifying turn knows what was already suggested
+    new_rejected_options = dict(rejected_options)
+    for f in first_attempt:
+        key = FIELD_KEY_MAP.get(f, f)
+        current = new_rejected_options.get(key, {"options": [], "counts": 0, "last_rejection_message_id": ""})
+        new_rejected_options[key] = {
+            "options": [],
+            "counts": current["counts"],
+            "last_rejection_message_id": current.get("last_rejection_message_id", ""),
+        }
+
+    logger.info(
+        f"clarifying_node completed | first_attempt={first_attempt} | "
+        f"second_attempt={second_attempt} | active_fields={active_fields}"
+    )
     return {
         "messages": [AIMessage(content=response.content)],
         "response_type": "brief_clarifying",
         "qna_response": None,
+        "rejected_options": new_rejected_options,
     }
 
 
 # ── NODE 6: brief_format_node ─────────────────────────────────────────────
 
 async def brief_format_node(state: AgentState) -> dict:
-    brief_state = format_brief_state(state)
+    brief = state.get("brief") or {}
+    brief_state = format_brief_state(brief)
+    logger.info(f"brief_format_node entry | brief={brief}")
 
     system = (
         "Відформатуйте повний детальний бриф проєкту для відображення користувачу.\n\n"
@@ -371,8 +475,6 @@ async def brief_format_node(state: AgentState) -> dict:
         "• Кожна секція — детальний параграф або список, не одне слово\n"
         "• Ключовий функціонал: кожен пункт — повне описове речення\n"
         "• Тільки українська мова\n"
-        "• Telegram HTML: <b>жирний</b>, <i>курсив</i>\n"
-        "• НЕ використовуйте Markdown (**, __ тощо)\n"
         + _HTML_FORMAT_RULE +
         "\n"
         "Використовуйте цей точний формат:\n\n"
@@ -400,13 +502,14 @@ async def brief_format_node(state: AgentState) -> dict:
 
 async def nonsense_node(state: AgentState) -> dict:
     last_human = _get_last_human(state)
+    logger.info(f"nonsense_node entry | message={last_human.content!r}")
     system = (
         "Користувач надіслав повідомлення, яке не стосується роботи бота. "
         "Ввічливо і коротко поясніть чим ви можете допомогти:\n"
         "• Відповіді на питання про компанію (послуги, технології, портфоліо)\n"
         "• Збір брифу для нового проєкту\n\n"
         "Будьте доброзичливими і лаконічними. "
-        "Тільки українська мова. Telegram HTML. Не Markdown.\n"
+        "Тільки українська мова.\n"
         + _HTML_FORMAT_RULE
     )
     response = await _get_llm(0.5).ainvoke([
@@ -424,7 +527,9 @@ async def nonsense_node(state: AgentState) -> dict:
 # ── NODE 8: estimation_node ───────────────────────────────────────────────
 
 async def estimation_node(state: AgentState) -> dict:
-    brief_state = format_brief_state(state)
+    brief = state.get("brief") or {}
+    brief_state = format_brief_state(brief)
+    logger.info(f"estimation_node entry | brief={brief}")
 
     system = (
         "Ти — досвідчений Tech Lead компанії з розробки ПЗ.\n"
@@ -448,13 +553,13 @@ async def estimation_node(state: AgentState) -> dict:
         "Формат відповіді (Telegram HTML):\n\n"
         "<b>Оцінка часу розробки</b>\n\n"
         "<b>Стадія: Pre-project work (UX)</b>\n"
-        "<i>Роботи:</i> [конкретний опис для цього проєкту]\n"
-        "<i>Години:</i> X – Y\n\n"
+        "Роботи: [конкретний опис для цього проєкту]\n"
+        "Години: X – Y\n\n"
         "... (інші стадії)\n\n"
         "<b>Разом: приблизно X – Y годин</b>\n"
         "<b>Термін: приблизно X – Y місяців</b>\n\n"
-        "<i>[Дисклеймер що оцінка орієнтовна, точні терміни і вартість "
-        "визначає комерційний відділ після детального обговорення]</i>\n\n"
+        "[Дисклеймер що оцінка орієнтовна, точні терміни і вартість "
+        "визначає комерційний відділ після детального обговорення]\n\n"
         + _HTML_FORMAT_RULE +
         f"\n═══ БРИФ ПРОЄКТУ ═══\n{brief_state}"
     )
@@ -468,12 +573,12 @@ async def estimation_node(state: AgentState) -> dict:
     }
 
 
-# ── Summarize node ────────────────────────────────────────────────────────
+# ── NODE 9: summarize_node ────────────────────────────────────────────────
 
 async def summarize_node(state: AgentState) -> dict:
     messages = state["messages"]
-    # Keep the newest keep_messages; compress everything older
-    old_messages = messages[:-config.memory.keep_messages]
+    # Compress the 5 oldest messages; result has at most 8 messages per turn
+    old_messages = messages[:5]
     existing_summary = state.get("summary", "") or ""
 
     formatted = "\n".join(
@@ -487,7 +592,10 @@ async def summarize_node(state: AgentState) -> dict:
     )
 
     response = await _get_llm(config.llm.temperature).ainvoke([HumanMessage(summary_prompt)])
-    logger.info(f"Summarized {len(old_messages)} old messages, keeping last {config.memory.keep_messages}")
+    logger.info(
+        f"summarize_node: compressed {len(old_messages)} messages, "
+        f"{len(messages) - len(old_messages)} remaining"
+    )
 
     return {
         "messages": [RemoveMessage(id=m.id) for m in old_messages],

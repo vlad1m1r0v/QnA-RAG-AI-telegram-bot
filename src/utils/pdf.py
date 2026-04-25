@@ -86,6 +86,7 @@ _BRIEF_FIELDS: list[tuple[str, str, bool]] = [
 def generate_pdf(agent_state: dict, client_name: str, client_phone: str) -> bytes:
     """Generate a project brief PDF and return its bytes."""
     font, bold_font = _register_fonts()
+    brief = agent_state.get("brief") or {}
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -140,7 +141,7 @@ def generate_pdf(agent_state: dict, client_name: str, client_phone: str) -> byte
 
     # Brief fields
     for key, label, is_list in _BRIEF_FIELDS:
-        value = agent_state.get(key)
+        value = brief.get(key)
 
         if is_list:
             items = value or []
