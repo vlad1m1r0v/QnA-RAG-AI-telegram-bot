@@ -2,83 +2,20 @@ from functools import lru_cache
 
 from langchain_core.messages import HumanMessage, SystemMessage, RemoveMessage, AIMessage
 from langchain_groq import ChatGroq
-from pydantic import BaseModel, Field
 
 from src.config import config
 from src.secrets import secrets
+from src.llm.schemas import RouterOutput, BriefUpdateOutput
 from src.llm.state import AgentState
 from src.llm.retriever import get_retriever
-from src.utils.brief import format_brief_state, build_history, FIELD_KEY_MAP, is_str_complete, is_list_complete
+from src.utils.brief import (
+    format_brief_state, build_history, get_last_human, get_last_ai,
+    FIELD_KEY_MAP, HTML_FORMAT_RULE, is_str_complete, is_list_complete,
+)
 from src.utils.docs import format_docs
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-_HTML_FORMAT_RULE = (
-    "Правила форматування Telegram HTML:\n"
-    "• <b>жирний</b> — ТІЛЬКИ для назв технологій та абревіатур (Android, iOS, CRM, API, UX, UI тощо)\n"
-    "• <i>курсив</i> — ТІЛЬКИ для питань\n"
-    "• Списки варіантів та пункти — маркований список (• пункт) без тегів\n"
-    "• В усіх інших випадках — звичайний текст без тегів\n"
-    "• НЕ використовуй <b> для заголовків, підкреслення важливості або будь-чого іншого\n"
-    "• НЕ використовуй <i> для дисклеймерів, підказок або будь-чого крім питань\n"
-    "• НЕ використовуй <br>, <p>, <div>, <span>, <h1>–<h6> або будь-які інші HTML теги\n"
-    "• НЕ використовуй Markdown (**, __ тощо)\n"
-)
-
-
-# ── Structured output schemas ──────────────────────────────────────────────
-
-class RouterOutput(BaseModel):
-    has_question: bool = Field(
-        description="Message contains a question about company services, technology, portfolio, team, etc."
-    )
-    has_project_info: bool = Field(
-        description="Message contains ANY information useful for a project brief"
-    )
-    is_nonsense: bool = Field(
-        description="Message is completely irrelevant (weather, unrelated prices, etc.). "
-                    "Mutually exclusive with has_question and has_project_info."
-    )
-
-
-class BriefUpdateOutput(BaseModel):
-    project_type: str | None = Field(default=None)
-    project_description: str | None = Field(default=None)
-    goals: list[str] | None = Field(
-        default=None,
-        description="Complete updated goals list, or null if no change.",
-    )
-    key_features: list[str] | None = Field(
-        default=None,
-        description="Complete updated key features list, or null if no change.",
-    )
-    additional_features: list[str] | None = Field(
-        default=None,
-        description="Complete updated additional features list, or null if no change.",
-    )
-    integrations: list[str] | None = Field(
-        default=None,
-        description="Complete updated integrations list, or null if no change.",
-    )
-    client_materials: list[str] | None = Field(
-        default=None,
-        description="Complete updated client materials list, or null if no change.",
-    )
-    rejected_field: str | None = Field(
-        default=None,
-        description=(
-            "Internal snake_case field name if the user is clearly rejecting or refusing "
-            "the options/suggestions offered for a specific brief field. "
-            "Set ONLY when user says something like 'none of these work', 'don't need any of that', "
-            "'already told you', 'nothing fits', 'нічого з цього', 'жоден не підходить', "
-            "'не потрібно нічого з перерахованого'. "
-            "Analyze the last assistant message to determine which field was being discussed. "
-            "Valid values: project_type, project_description, goals, key_features, "
-            "additional_features, integrations, client_materials. "
-            "null if there is no clear rejection of offered options."
-        ),
-    )
 
 
 # ── LLM factory ───────────────────────────────────────────────────────────
@@ -92,20 +29,10 @@ def _get_llm(temperature: float) -> ChatGroq:
     )
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
-
-def _get_last_human(state: AgentState) -> HumanMessage:
-    return next(m for m in reversed(state["messages"]) if isinstance(m, HumanMessage))
-
-
-def _get_last_ai(state: AgentState) -> AIMessage | None:
-    return next((m for m in reversed(state["messages"]) if isinstance(m, AIMessage)), None)
-
-
 # ── NODE 1: router_node ───────────────────────────────────────────────────
 
 async def router_node(state: AgentState) -> dict:
-    last_human = _get_last_human(state)
+    last_human = get_last_human(state)
     llm = _get_llm(0.0).with_structured_output(RouterOutput, method="json_schema")
 
     system = (
@@ -150,7 +77,7 @@ async def router_node(state: AgentState) -> dict:
 # ── NODE 2: qna_node ─────────────────────────────────────────────────────
 
 async def qna_node(state: AgentState) -> dict:
-    last_human = _get_last_human(state)
+    last_human = get_last_human(state)
     retriever = get_retriever()
     summary, history = build_history(state)
 
@@ -189,7 +116,7 @@ async def qna_node(state: AgentState) -> dict:
             f"{context}\n"
             + (f"\n═══ СУМАРИЗАЦІЯ ПОПЕРЕДНЬОЇ РОЗМОВИ ═══\n{summary}\n" if summary else "")
             + "\nМова відповіді: виключно українська.\n"
-            + _HTML_FORMAT_RULE
+            + HTML_FORMAT_RULE
     )
 
     response = await _get_llm(0.3).ainvoke([SystemMessage(system), *history, HumanMessage(last_human.content)])
@@ -200,8 +127,8 @@ async def qna_node(state: AgentState) -> dict:
 # ── NODE 3: update_brief_node ─────────────────────────────────────────────
 
 async def update_brief_node(state: AgentState) -> dict:
-    last_human = _get_last_human(state)
-    last_ai = _get_last_ai(state)
+    last_human = get_last_human(state)
+    last_ai = get_last_ai(state)
     brief = state.get("brief") or {}
     brief_state = format_brief_state(brief)
     summary, history = build_history(state)
@@ -431,7 +358,7 @@ async def clarifying_node(state: AgentState) -> dict:
         f"═══ ПОТОЧНИЙ СТАН БРИФУ (тільки для вас) ═══\n{brief_state}\n\n"
         + (f"═══ СУМАРИЗАЦІЯ ПОПЕРЕДНЬОЇ РОЗМОВИ ═══\n{summary}\n\n" if summary else "")
         + "Тільки українська мова.\n"
-        + _HTML_FORMAT_RULE
+        + HTML_FORMAT_RULE
         + "• НЕ називайте технічних назв полів (project_type, goals тощо)\n"
         "• НЕ показуйте стан брифу або назви полів у відповіді\n"
     )
@@ -475,7 +402,7 @@ async def brief_format_node(state: AgentState) -> dict:
         "• Кожна секція — детальний параграф або список, не одне слово\n"
         "• Ключовий функціонал: кожен пункт — повне описове речення\n"
         "• Тільки українська мова\n"
-        + _HTML_FORMAT_RULE +
+        + HTML_FORMAT_RULE +
         "\n"
         "Використовуйте цей точний формат:\n\n"
         "<b>Бриф проєкту</b>\n\n"
@@ -501,7 +428,7 @@ async def brief_format_node(state: AgentState) -> dict:
 # ── NODE 7: nonsense_node ─────────────────────────────────────────────────
 
 async def nonsense_node(state: AgentState) -> dict:
-    last_human = _get_last_human(state)
+    last_human = get_last_human(state)
     logger.info(f"nonsense_node entry | message={last_human.content!r}")
     system = (
         "Користувач надіслав повідомлення, яке не стосується роботи бота. "
@@ -510,7 +437,7 @@ async def nonsense_node(state: AgentState) -> dict:
         "• Збір брифу для нового проєкту\n\n"
         "Будьте доброзичливими і лаконічними. "
         "Тільки українська мова.\n"
-        + _HTML_FORMAT_RULE
+        + HTML_FORMAT_RULE
     )
     response = await _get_llm(0.5).ainvoke([
         SystemMessage(system),
@@ -560,7 +487,7 @@ async def estimation_node(state: AgentState) -> dict:
         "<b>Термін: приблизно X – Y місяців</b>\n\n"
         "[Дисклеймер що оцінка орієнтовна, точні терміни і вартість "
         "визначає комерційний відділ після детального обговорення]\n\n"
-        + _HTML_FORMAT_RULE +
+        + HTML_FORMAT_RULE +
         f"\n═══ БРИФ ПРОЄКТУ ═══\n{brief_state}"
     )
 

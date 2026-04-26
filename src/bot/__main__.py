@@ -1,5 +1,8 @@
 import asyncio
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from aiogram import Dispatcher, F
 from aiogram.filters import Command
 from aiogram.fsm.storage.pymongo import PyMongoStorage

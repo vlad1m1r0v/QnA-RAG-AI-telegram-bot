@@ -1,4 +1,16 @@
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
+
+HTML_FORMAT_RULE = (
+    "Правила форматування Telegram HTML:\n"
+    "• <b>жирний</b> — ТІЛЬКИ для назв технологій та абревіатур (Android, iOS, CRM, API, UX, UI тощо)\n"
+    "• <i>курсив</i> — ТІЛЬКИ для питань\n"
+    "• Списки варіантів та пункти — маркований список (• пункт) без тегів\n"
+    "• В усіх інших випадках — звичайний текст без тегів\n"
+    "• НЕ використовуй <b> для заголовків, підкреслення важливості або будь-чого іншого\n"
+    "• НЕ використовуй <i> для дисклеймерів, підказок або будь-чого крім питань\n"
+    "• НЕ використовуй <br>, <p>, <div>, <span>, <h1>–<h6> або будь-які інші HTML теги\n"
+    "• НЕ використовуй Markdown (**, __ тощо)\n"
+)
 
 # Maps validation_node's Ukrainian display names → internal snake_case field keys
 FIELD_KEY_MAP: dict[str, str] = {
@@ -29,6 +41,14 @@ def format_brief_state(brief: dict) -> str:
         f"Інтеграції: {fmt(brief.get('integrations', []))}\n"
         f"Матеріали від клієнта: {fmt(brief.get('client_materials', []))}\n"
     )
+
+
+def get_last_human(state: dict) -> HumanMessage:
+    return next(m for m in reversed(state["messages"]) if isinstance(m, HumanMessage))
+
+
+def get_last_ai(state: dict) -> AIMessage | None:
+    return next((m for m in reversed(state["messages"]) if isinstance(m, AIMessage)), None)
 
 
 def build_history(state: dict, n: int = 4):
