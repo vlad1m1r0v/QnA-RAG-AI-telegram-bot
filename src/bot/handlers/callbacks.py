@@ -2,7 +2,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 from langchain_core.messages import HumanMessage
 
-from src.bot.helpers import sanitize_telegram_html
+from src.utils.html import sanitize_telegram_html
 from src.bot.instance import bot
 from src.bot.keyboards import contact_keyboard, send_brief_keyboard
 from src.bot.states import BriefFSM

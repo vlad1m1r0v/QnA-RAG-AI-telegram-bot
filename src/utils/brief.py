@@ -10,6 +10,7 @@ HTML_FORMAT_RULE = (
     "• НЕ використовуй <i> для дисклеймерів, підказок або будь-чого крім питань\n"
     "• НЕ використовуй <br>, <p>, <div>, <span>, <h1>–<h6> або будь-які інші HTML теги\n"
     "• НЕ використовуй Markdown (**, __ тощо)\n"
+    "• НЕ додавай порожній рядок між вступним реченням і списком що йде після нього.\n"
 )
 
 # Maps validation_node's Ukrainian display names → internal snake_case field keys

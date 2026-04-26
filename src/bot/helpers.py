@@ -1,26 +1,13 @@
-import re
-
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from src.bot.keyboards import brief_ready_keyboard
 from src.bot.states import BriefFSM
 from src.llm.graph import ask_bot_async
+from src.utils.html import sanitize_telegram_html
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-_ALLOWED_TAGS = {'b', 'i', 'a'}
-
-
-def sanitize_telegram_html(text: str) -> str:
-    text = re.sub(r'<br\s*/?>', '\n', text)
-    text = re.sub(
-        r'<(/?)(\w+)([^>]*)>',
-        lambda m: m.group(0) if m.group(2).lower() in _ALLOWED_TAGS else '',
-        text,
-    )
-    return text
 
 
 async def reply_llm(message: Message, question: str, graph, state: FSMContext) -> None:
