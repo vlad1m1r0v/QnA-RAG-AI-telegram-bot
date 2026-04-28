@@ -296,14 +296,6 @@ async def clarifying_node(state: AgentState) -> dict:
     second_attempt = [f for f in fields_to_ask if
                       rejected_options.get(FIELD_KEY_MAP.get(f, f), {}).get("counts", 0) == 1]
 
-    qna_block = ""
-    if qna_response:
-        qna_block = (
-            "ВАЖЛИВО: У відповіді СПОЧАТКУ включіть наступний текст дослівно, "
-            "а потім через порожній рядок задайте уточнюючі питання:\n\n"
-            f"{qna_response}\n\n"
-        )
-
     if not project_type:
         task_instruction = (
             "Тип проєкту ще невідомий. "
@@ -354,24 +346,25 @@ async def clarifying_node(state: AgentState) -> dict:
     fields_info = f"Відсутні поля: {', '.join(fields_to_ask)}\n" if fields_to_ask else ""
 
     system = (
-            "Ви — AI-асистент компанії, що збирає бриф проєкту.\n\n"
-            "ВАЖЛИВО: Перед тим як формувати питання, перегляньте ВСЮ ІСТОРІЮ РОЗМОВИ нижче.\n"
-            "• НЕ повторюйте варіанти або питання, які вже були задані раніше.\n"
-            "• НЕ питайте про теми, які вже обговорювались, навіть якщо поле технічно порожнє.\n"
-            "• Враховуйте контекст попередніх відповідей користувача.\n"
-            "• НЕ питайте про поля зі значенням 'не визначено' — вони вже закриті.\n\n"
-            f"{qna_block}"
-            f"{task_instruction}\n"
-            f"Поля для уточнення:\n{fields_info}\n"
-            f"═══ ПОТОЧНИЙ СТАН БРИФУ (тільки для вас) ═══\n{brief_state}\n\n"
-            + (f"═══ СУМАРИЗАЦІЯ ПОПЕРЕДНЬОЇ РОЗМОВИ ═══\n{summary}\n\n" if summary else "")
-            + "Тільки українська мова.\n"
-            + HTML_FORMAT_RULE
-            + "• НЕ називайте технічних назв полів (project_type, goals тощо)\n"
-              "• НЕ показуйте стан брифу або назви полів у відповіді\n"
+        "Ви — AI-асистент компанії, що збирає бриф проєкту.\n\n"
+        "ВАЖЛИВО: Перед тим як формувати питання, перегляньте ВСЮ ІСТОРІЮ РОЗМОВИ нижче.\n"
+        "• НЕ повторюйте варіанти або питання, які вже були задані раніше.\n"
+        "• НЕ питайте про теми, які вже обговорювались, навіть якщо поле технічно порожнє.\n"
+        "• Враховуйте контекст попередніх відповідей користувача.\n"
+        "• НЕ питайте про поля зі значенням 'не визначено' — вони вже закриті.\n\n"
+        f"{task_instruction}\n"
+        f"Поля для уточнення:\n{fields_info}\n"
+        f"═══ ПОТОЧНИЙ СТАН БРИФУ (тільки для вас) ═══\n{brief_state}\n\n"
+        + (f"═══ СУМАРИЗАЦІЯ ПОПЕРЕДНЬОЇ РОЗМОВИ ═══\n{summary}\n\n" if summary else "")
+        + "Тільки українська мова.\n"
+        + HTML_FORMAT_RULE
+        + "• НЕ називайте технічних назв полів (project_type, goals тощо)\n"
+          "• НЕ показуйте стан брифу або назви полів у відповіді\n"
     )
 
     response = await _get_llm(0.7).ainvoke([SystemMessage(system), *history])
+
+    final_text = (qna_response + "\n\n" + response.content) if qna_response else response.content
 
     # Store offered response in rejected_options for first-attempt fields so
     # the next clarifying turn knows what was already suggested
@@ -390,7 +383,7 @@ async def clarifying_node(state: AgentState) -> dict:
         f"second_attempt={second_attempt} | active_fields={active_fields}"
     )
     return {
-        "messages": [AIMessage(content=response.content)],
+        "messages": [AIMessage(content=final_text)],
         "response_type": "brief_clarifying",
         "qna_response": None,
         "rejected_options": new_rejected_options,
