@@ -5,4 +5,5 @@ class BriefFSM(StatesGroup):
     idle = State()
     brief_ready = State()
     estimation = State()
-    awaiting_contact = State()
+    awaiting_phone = State()
+    awaiting_name = State()

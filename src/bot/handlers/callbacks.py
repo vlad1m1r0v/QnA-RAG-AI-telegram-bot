@@ -33,9 +33,10 @@ async def handle_send_brief(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Бриф ще не готовий", show_alert=True)
         return
     await callback.answer()
-    await state.set_state(BriefFSM.awaiting_contact)
+    await state.set_state(BriefFSM.awaiting_phone)
     await callback.message.answer(
-        "Будь ласка, поділіться своїм контактом, щоб ми могли надіслати бриф менеджеру.",
+        "Введіть номер телефону у міжнародному форматі (наприклад: +380991234567) "
+        "або натисніть кнопку нижче, щоб поділитися контактом автоматично.",
         reply_markup=contact_keyboard(),
         parse_mode=None,
     )

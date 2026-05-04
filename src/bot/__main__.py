@@ -13,9 +13,10 @@ from src.bot.handlers.callbacks import handle_estimate, handle_send_brief
 from src.bot.handlers.commands import cmd_start, cmd_reset_memory
 from src.bot.handlers.messages import (
     handle_audio,
-    handle_contact,
+    handle_name_text,
+    handle_phone_contact,
+    handle_phone_text,
     handle_text,
-    handle_text_awaiting_contact,
 )
 from src.bot.instance import bot
 from src.bot.states import BriefFSM
@@ -39,8 +40,9 @@ async def main():
     dp.message.register(cmd_reset_memory, Command("reset_memory"))
     dp.callback_query.register(handle_estimate, F.data == "gen_estimate")
     dp.callback_query.register(handle_send_brief, F.data == "send_brief")
-    dp.message.register(handle_contact, BriefFSM.awaiting_contact, F.contact)
-    dp.message.register(handle_text_awaiting_contact, BriefFSM.awaiting_contact, F.text)
+    dp.message.register(handle_phone_contact, BriefFSM.awaiting_phone, F.contact)
+    dp.message.register(handle_phone_text, BriefFSM.awaiting_phone, F.text)
+    dp.message.register(handle_name_text, BriefFSM.awaiting_name, F.text)
     dp.message.register(handle_text, F.text)
     dp.message.register(handle_audio, F.voice | F.audio)
 
